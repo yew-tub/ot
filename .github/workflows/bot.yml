@@ -6,6 +6,15 @@ on:
     - cron: '*/10 * * * *'
   workflow_dispatch:
     # Allow manual trigger
+    inputs:
+      mode:
+        description: 'Bot mode'
+        required: false
+        default: 'single'
+        type: choice
+        options:
+          - single
+          - continuous
   push:
     branches: [ main ]
     paths-ignore:
@@ -15,10 +24,13 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.mode == 'single'
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
     
     - name: Setup Node.js
       uses: actions/setup-node@v4
@@ -26,8 +38,20 @@ jobs:
         node-version: '18'
         cache: 'npm'
     
-    - name: Install dependencies
-      run: npm ci
+    - name: Generate package-lock.json if missing
+      run: |
+        if [ ! -f "package-lock.json" ]; then
+          echo "package-lock.json not found, generating..."
+          npm install
+          git config --global user.email "action@github.com"
+          git config --global user.name "GitHub Action"
+          git add package-lock.json
+          git commit -m "Auto-generate package-lock.json [skip ci]" || echo "No changes to commit"
+          git push || echo "Nothing to push"
+        else
+          echo "package-lock.json exists, using npm ci"
+          npm ci
+        fi
     
     - name: Run bot (single scan)
       env:
@@ -84,7 +108,12 @@ jobs:
         cache: 'npm'
     
     - name: Install dependencies
-      run: npm ci
+      run: |
+        if [ ! -f "package-lock.json" ]; then
+          npm install
+        else
+          npm ci
+        fi
     
     - name: Run bot continuously
       env:
