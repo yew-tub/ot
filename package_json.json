@@ -20,7 +20,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/you-tub/ot.git"
+    "url": "git+https://github.com/yew-tub/ot.git"
   },
   "keywords": [
     "stacker-news",
