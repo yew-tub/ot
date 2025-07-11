@@ -1,5 +1,5 @@
 {
-  "name": "stacker-news-youtube-bot",
+  "name": "sn-yew-tub-ot",
   "version": "1.0.0",
   "description": "Bot that converts YouTube links to Yewtu.be alternatives on Stacker.News",
   "main": "bot.js",
@@ -20,7 +20,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yourusername/stacker-news-youtube-bot.git"
+    "url": "git+https://github.com/you-tub/ot.git"
   },
   "keywords": [
     "stacker-news",
