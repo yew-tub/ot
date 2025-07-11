@@ -1,0 +1,95 @@
+name: Stacker.News YouTube Bot
+
+on:
+  schedule:
+    # Run every 10 minutes
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    # Allow manual trigger
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - 'README.md'
+      - '.gitignore'
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run bot (single scan)
+      env:
+        NOSTR_PRIVATE_KEY: ${{ secrets.NOSTR_PRIVATE_KEY }}
+        NODE_ENV: production
+      run: |
+        timeout 540 node -e "
+        const StackerNewsBot = require('./bot.js');
+        const bot = new StackerNewsBot();
+        
+        async function runOnce() {
+          console.log('Running single scan...');
+          
+          const authSuccess = await bot.authenticate();
+          if (!authSuccess) {
+            console.log('Authentication failed, running in read-only mode');
+          }
+          
+          try {
+            const items = await bot.fetchRecentContent();
+            console.log(\`Processing \${items.length} items...\`);
+            
+            for (const item of items) {
+              await bot.processItem(item);
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            
+            console.log('Single scan completed successfully');
+          } catch (error) {
+            console.error('Error during scan:', error);
+            process.exit(1);
+          }
+        }
+        
+        runOnce().catch(console.error);
+        " || echo "Bot run completed or timed out"
+    
+    - name: Log completion
+      run: echo "Bot execution completed at $(date)"
+
+  # Alternative: Long-running bot (use only one of these jobs)
+  run-bot-continuous:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'continuous'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run bot continuously
+      env:
+        NOSTR_PRIVATE_KEY: ${{ secrets.NOSTR_PRIVATE_KEY }}
+        NODE_ENV: production
+      run: |
+        # Run for maximum GitHub Actions time limit (6 hours)
+        timeout 21600 npm start || echo "Bot stopped after timeout"
