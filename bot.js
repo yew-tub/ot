@@ -1,7 +1,6 @@
-// bot.js - Stacker.News YouTube to Yewtu.be Bot
+// bot.js - Updated Stacker.News YouTube to Yewtu.be Bot
 const { GraphQLClient } = require('graphql-request');
 const { getPublicKey, getEventHash, signEvent, generatePrivateKey, nip19 } = require('nostr-tools');
-const WebSocket = require('ws');
 
 class StackerNewsBot {
   constructor() {
@@ -45,10 +44,39 @@ class StackerNewsBot {
     this.youtubeRegex = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/g;
   }
 
+  // Test the GraphQL endpoint with a simple query
+  async testGraphQLEndpoint() {
+    const testQuery = `
+      query TestQuery {
+        __schema {
+          queryType {
+            name
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await this.graphqlClient.request(testQuery);
+      console.log('GraphQL endpoint is accessible');
+      return true;
+    } catch (error) {
+      console.error('GraphQL endpoint test failed:', error.message);
+      return false;
+    }
+  }
+
   // Authenticate with Stacker.News using Nostr
   async authenticate() {
     try {
       console.log('Authenticating with Stacker.News...');
+      
+      // Test endpoint first
+      const endpointWorking = await this.testGraphQLEndpoint();
+      if (!endpointWorking) {
+        console.error('GraphQL endpoint is not accessible');
+        return false;
+      }
       
       // Create authentication event
       const authEvent = {
@@ -65,58 +93,225 @@ class StackerNewsBot {
       authEvent.id = getEventHash(authEvent);
       authEvent.sig = signEvent(authEvent, this.botPrivateKey);
 
-      const authMutation = `
-        mutation AuthNostr($event: String!) {
-          authNostr(event: $event) {
-            token
-            user {
-              id
-              name
+      // Try different authentication mutation formats
+      const authMutations = [
+        // Current format
+        `
+          mutation AuthNostr($event: String!) {
+            authNostr(event: $event) {
+              token
+              user {
+                id
+                name
+              }
             }
           }
+        `,
+        // Alternative format with eventData
+        `
+          mutation AuthNostr($eventData: String!) {
+            authNostr(eventData: $eventData) {
+              token
+              user {
+                id
+                name
+              }
+            }
+          }
+        `,
+        // Alternative format with input object
+        `
+          mutation AuthNostr($input: AuthNostrInput!) {
+            authNostr(input: $input) {
+              token
+              user {
+                id
+                name
+              }
+            }
+          }
+        `
+      ];
+
+      for (const [index, authMutation] of authMutations.entries()) {
+        try {
+          console.log(`Trying authentication method ${index + 1}...`);
+          
+          let variables;
+          if (index === 0) {
+            variables = { event: JSON.stringify(authEvent) };
+          } else if (index === 1) {
+            variables = { eventData: JSON.stringify(authEvent) };
+          } else {
+            variables = { input: { event: JSON.stringify(authEvent) } };
+          }
+
+          const response = await this.graphqlClient.request(authMutation, variables);
+
+          if (response.authNostr?.token) {
+            this.authToken = response.authNostr.token;
+            this.isAuthenticated = true;
+            this.graphqlClient.setHeader('Authorization', `Bearer ${this.authToken}`);
+            console.log('Successfully authenticated with Stacker.News');
+            return true;
+          }
+        } catch (error) {
+          console.log(`Authentication method ${index + 1} failed:`, error.message);
+          if (index === authMutations.length - 1) {
+            console.error('All authentication methods failed');
+          }
         }
-      `;
-
-      const response = await this.graphqlClient.request(authMutation, {
-        event: JSON.stringify(authEvent)
-      });
-
-      if (response.authNostr?.token) {
-        this.authToken = response.authNostr.token;
-        this.isAuthenticated = true;
-        this.graphqlClient.setHeader('Authorization', `Bearer ${this.authToken}`);
-        console.log('Successfully authenticated with Stacker.News');
-        return true;
       }
+
+      return false;
     } catch (error) {
       console.error('Authentication failed:', error);
       return false;
     }
   }
 
-  // Fetch recent posts and comments
+  // Fetch recent posts and comments with improved error handling
   async fetchRecentContent() {
+    // Try different query formats
+    const queries = [
+      // Current format
+      {
+        query: `
+          query RecentContent($sort: String!, $when: String!) {
+            items(sort: $sort, when: $when, limit: 50) {
+              items {
+                id
+                title
+                text
+                url
+                createdAt
+                user {
+                  name
+                  id
+                }
+                comments {
+                  id
+                  text
+                  createdAt
+                  user {
+                    name
+                    id
+                  }
+                }
+              }
+            }
+          }
+        `,
+        variables: { sort: 'recent', when: 'day' }
+      },
+      // Alternative format with different field names
+      {
+        query: `
+          query RecentContent($sort: String!, $when: String!) {
+            items(sort: $sort, when: $when, limit: 50) {
+              cursor
+              items {
+                id
+                title
+                text
+                url
+                createdAt
+                user {
+                  name
+                  id
+                }
+                comments {
+                  id
+                  text
+                  createdAt
+                  user {
+                    name
+                    id
+                  }
+                }
+              }
+            }
+          }
+        `,
+        variables: { sort: 'recent', when: 'day' }
+      },
+      // Simplified query without comments
+      {
+        query: `
+          query RecentContent($sort: String!, $when: String!) {
+            items(sort: $sort, when: $when, limit: 50) {
+              items {
+                id
+                title
+                text
+                url
+                createdAt
+                user {
+                  name
+                  id
+                }
+              }
+            }
+          }
+        `,
+        variables: { sort: 'recent', when: 'day' }
+      },
+      // Alternative with different parameter names
+      {
+        query: `
+          query RecentContent($sort: ItemSort!, $when: ItemWhen!) {
+            items(sort: $sort, when: $when, limit: 50) {
+              items {
+                id
+                title
+                text
+                url
+                createdAt
+                user {
+                  name
+                  id
+                }
+              }
+            }
+          }
+        `,
+        variables: { sort: 'RECENT', when: 'DAY' }
+      }
+    ];
+
+    for (const [index, { query, variables }] of queries.entries()) {
+      try {
+        console.log(`Trying query format ${index + 1}...`);
+        const response = await this.graphqlClient.request(query, variables);
+        
+        if (response.items?.items) {
+          console.log(`Successfully fetched ${response.items.items.length} items`);
+          return response.items.items;
+        }
+      } catch (error) {
+        console.log(`Query format ${index + 1} failed:`, error.message);
+        if (index === queries.length - 1) {
+          console.error('All query formats failed');
+        }
+      }
+    }
+
+    return [];
+  }
+
+  // Fetch comments for a specific item
+  async fetchItemComments(itemId) {
     const query = `
-      query RecentContent($sort: String!, $when: String!) {
-        items(sort: $sort, when: $when, limit: 50) {
-          items {
+      query ItemComments($id: ID!) {
+        item(id: $id) {
+          id
+          comments {
             id
-            title
             text
-            url
             createdAt
             user {
               name
               id
-            }
-            comments {
-              id
-              text
-              createdAt
-              user {
-                name
-                id
-              }
             }
           }
         }
@@ -124,14 +319,10 @@ class StackerNewsBot {
     `;
 
     try {
-      const response = await this.graphqlClient.request(query, {
-        sort: 'recent',
-        when: 'day'
-      });
-
-      return response.items?.items || [];
+      const response = await this.graphqlClient.request(query, { id: itemId });
+      return response.item?.comments || [];
     } catch (error) {
-      console.error('Error fetching content:', error);
+      console.error(`Error fetching comments for item ${itemId}:`, error.message);
       return [];
     }
   }
@@ -169,27 +360,65 @@ class StackerNewsBot {
 
     const commentText = `${linkText}\n\n*Privacy-friendly YouTube alternative via Yewtu.be*`;
 
-    const mutation = `
-      mutation CreateComment($text: String!, $parentId: ID!) {
-        createComment(text: $text, parentId: $parentId) {
-          id
-          text
+    // Try different mutation formats
+    const mutations = [
+      // Current format
+      `
+        mutation CreateComment($text: String!, $parentId: ID!) {
+          createComment(text: $text, parentId: $parentId) {
+            id
+            text
+          }
+        }
+      `,
+      // Alternative format with input object
+      `
+        mutation CreateComment($input: CreateCommentInput!) {
+          createComment(input: $input) {
+            id
+            text
+          }
+        }
+      `,
+      // Alternative format with different field names
+      `
+        mutation CreateComment($content: String!, $parentId: ID!) {
+          createComment(content: $content, parentId: $parentId) {
+            id
+            text
+          }
+        }
+      `
+    ];
+
+    for (const [index, mutation] of mutations.entries()) {
+      try {
+        console.log(`Trying comment creation method ${index + 1}...`);
+        
+        let variables;
+        if (index === 0) {
+          variables = { text: commentText, parentId: parentId };
+        } else if (index === 1) {
+          variables = { input: { text: commentText, parentId: parentId } };
+        } else {
+          variables = { content: commentText, parentId: parentId };
+        }
+
+        const response = await this.graphqlClient.request(mutation, variables);
+        
+        if (response.createComment?.id) {
+          console.log(`Posted comment for item ${parentId}:`, response.createComment.id);
+          return true;
+        }
+      } catch (error) {
+        console.log(`Comment creation method ${index + 1} failed:`, error.message);
+        if (index === mutations.length - 1) {
+          console.error('All comment creation methods failed');
         }
       }
-    `;
-
-    try {
-      const response = await this.graphqlClient.request(mutation, {
-        text: commentText,
-        parentId: parentId
-      });
-
-      console.log(`Posted comment for item ${parentId}:`, response.createComment?.id);
-      return true;
-    } catch (error) {
-      console.error('Error posting comment:', error);
-      return false;
     }
+
+    return false;
   }
 
   // Process a single item (post or comment)
@@ -206,12 +435,19 @@ class StackerNewsBot {
     
     if (postYouTubeLinks.length > 0) {
       console.log(`Found ${postYouTubeLinks.length} YouTube link(s) in post ${item.id}`);
-      await this.postComment(item.id, postYouTubeLinks);
-      this.processedItems.add(itemKey);
+      const success = await this.postComment(item.id, postYouTubeLinks);
+      if (success) {
+        this.processedItems.add(itemKey);
+      }
     }
 
-    // Check comments
-    for (const comment of item.comments || []) {
+    // Check comments - either from the initial fetch or fetch separately
+    let comments = item.comments || [];
+    if (comments.length === 0) {
+      comments = await this.fetchItemComments(item.id);
+    }
+
+    for (const comment of comments) {
       const commentKey = `${comment.id}-${comment.createdAt}`;
       
       if (this.processedItems.has(commentKey)) {
@@ -222,9 +458,32 @@ class StackerNewsBot {
       
       if (commentYouTubeLinks.length > 0) {
         console.log(`Found ${commentYouTubeLinks.length} YouTube link(s) in comment ${comment.id}`);
-        await this.postComment(comment.id, commentYouTubeLinks);
-        this.processedItems.add(commentKey);
+        const success = await this.postComment(comment.id, commentYouTubeLinks);
+        if (success) {
+          this.processedItems.add(commentKey);
+        }
       }
+    }
+  }
+
+  // Test individual GraphQL operations
+  async testOperations() {
+    console.log('Testing GraphQL operations...');
+    
+    // Test items query
+    try {
+      const items = await this.fetchRecentContent();
+      console.log(`✓ Items query working - fetched ${items.length} items`);
+    } catch (error) {
+      console.log('✗ Items query failed:', error.message);
+    }
+    
+    // Test authentication
+    try {
+      const authSuccess = await this.authenticate();
+      console.log(`${authSuccess ? '✓' : '✗'} Authentication ${authSuccess ? 'successful' : 'failed'}`);
+    } catch (error) {
+      console.log('✗ Authentication failed:', error.message);
     }
   }
 
@@ -232,7 +491,10 @@ class StackerNewsBot {
   async start() {
     console.log('Starting Stacker.News YouTube Bot...');
     
-    // Authenticate first
+    // Test operations first
+    await this.testOperations();
+    
+    // Try to authenticate
     const authSuccess = await this.authenticate();
     if (!authSuccess) {
       console.log('Authentication failed, running in read-only mode');
@@ -244,12 +506,18 @@ class StackerNewsBot {
         console.log('Fetching recent content...');
         const items = await this.fetchRecentContent();
         
+        if (items.length === 0) {
+          console.log('No items fetched, waiting before retrying...');
+          await new Promise(resolve => setTimeout(resolve, 2 * 60 * 1000)); // 2 minutes
+          continue;
+        }
+        
         console.log(`Processing ${items.length} items...`);
         
         for (const item of items) {
           await this.processItem(item);
           // Add delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          await new Promise(resolve => setTimeout(resolve, 2000)); // 2 seconds
         }
         
         // Clean up old processed items (keep last 1000)
@@ -263,7 +531,7 @@ class StackerNewsBot {
         
       } catch (error) {
         console.error('Error in main loop:', error);
-        await new Promise(resolve => setTimeout(resolve, 60 * 1000)); // Wait 1 minute on error
+        await new Promise(resolve => setTimeout(resolve, 2 * 60 * 1000)); // Wait 2 minutes on error
       }
     }
   }
