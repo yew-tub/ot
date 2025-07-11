@@ -1,0 +1,35 @@
+{
+  "name": "stacker-news-youtube-bot",
+  "version": "1.0.0",
+  "description": "Bot that converts YouTube links to Yewtu.be alternatives on Stacker.News",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js"
+  },
+  "dependencies": {
+    "graphql-request": "^6.1.0",
+    "nostr-tools": "^1.17.0",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yew-tub/ot.git"
+  },
+  "keywords": [
+    "stacker-news",
+    "youtube",
+    "yewtu.be",
+    "privacy",
+    "bot",
+    "nostr"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
