@@ -172,70 +172,9 @@ class StackerNewsBot {
 
   // Fetch recent posts and comments with improved error handling
   async fetchRecentContent() {
-    // Try different query formats
+    // Try different query formats - removed comments from initial fetch
     const queries = [
-      // Current format
-      {
-        query: `
-          query RecentContent($sort: String!, $when: String!) {
-            items(sort: $sort, when: $when, limit: 50) {
-              items {
-                id
-                title
-                text
-                url
-                createdAt
-                user {
-                  name
-                  id
-                }
-                comments {
-                  id
-                  text
-                  createdAt
-                  user {
-                    name
-                    id
-                  }
-                }
-              }
-            }
-          }
-        `,
-        variables: { sort: 'recent', when: 'day' }
-      },
-      // Alternative format with different field names
-      {
-        query: `
-          query RecentContent($sort: String!, $when: String!) {
-            items(sort: $sort, when: $when, limit: 50) {
-              cursor
-              items {
-                id
-                title
-                text
-                url
-                createdAt
-                user {
-                  name
-                  id
-                }
-                comments {
-                  id
-                  text
-                  createdAt
-                  user {
-                    name
-                    id
-                  }
-                }
-              }
-            }
-          }
-        `,
-        variables: { sort: 'recent', when: 'day' }
-      },
-      // Simplified query without comments
+      // Simplified query without comments (fetch comments separately)
       {
         query: `
           query RecentContent($sort: String!, $when: String!) {
@@ -276,6 +215,27 @@ class StackerNewsBot {
           }
         `,
         variables: { sort: 'RECENT', when: 'DAY' }
+      },
+      // Even simpler query
+      {
+        query: `
+          query RecentContent {
+            items(sort: "recent", when: "day", limit: 50) {
+              items {
+                id
+                title
+                text
+                url
+                createdAt
+                user {
+                  name
+                  id
+                }
+              }
+            }
+          }
+        `,
+        variables: {}
       }
     ];
 
@@ -299,38 +259,130 @@ class StackerNewsBot {
     return [];
   }
 
-  // Fetch comments for a specific item
+  // Fetch comments for a specific item - FIXED QUERY
   async fetchItemComments(itemId) {
-    const query = `
-      query ItemComments($id: ID!) {
-        item(id: $id) {
-          id
-          comments {
-            id
-            text
-            createdAt
-            user {
-              name
+    // Try different query formats for comments
+    const queries = [
+      // Format 1: Direct item query with comments as items
+      {
+        query: `
+          query ItemComments($id: ID!) {
+            item(id: $id) {
               id
+              comments {
+                cursor
+                items {
+                  id
+                  text
+                  createdAt
+                  user {
+                    name
+                    id
+                  }
+                }
+              }
             }
           }
+        `,
+        variables: { id: itemId }
+      },
+      // Format 2: Using the items query with parent filter
+      {
+        query: `
+          query ItemComments($parentId: ID!) {
+            items(parentId: $parentId, limit: 100) {
+              items {
+                id
+                text
+                createdAt
+                user {
+                  name
+                  id
+                }
+              }
+            }
+          }
+        `,
+        variables: { parentId: itemId }
+      },
+      // Format 3: Simplified comments query
+      {
+        query: `
+          query ItemComments($id: ID!) {
+            item(id: $id) {
+              id
+              comments {
+                items {
+                  id
+                  text
+                  createdAt
+                  user {
+                    name
+                    id
+                  }
+                }
+              }
+            }
+          }
+        `,
+        variables: { id: itemId }
+      },
+      // Format 4: Just get the item structure to understand the schema
+      {
+        query: `
+          query ItemComments($id: ID!) {
+            item(id: $id) {
+              id
+              title
+              text
+              createdAt
+              user {
+                name
+                id
+              }
+            }
+          }
+        `,
+        variables: { id: itemId }
+      }
+    ];
+
+    for (const [index, { query, variables }] of queries.entries()) {
+      try {
+        console.log(`Trying comments query format ${index + 1} for item ${itemId}...`);
+        const response = await this.graphqlClient.request(query, variables);
+        
+        // Handle different response structures
+        if (response.item?.comments?.items) {
+          console.log(`Successfully fetched ${response.item.comments.items.length} comments`);
+          return response.item.comments.items;
+        } else if (response.items?.items) {
+          console.log(`Successfully fetched ${response.items.items.length} comments`);
+          return response.items.items;
+        } else if (response.item) {
+          console.log(`Item ${itemId} fetched but no comments structure found`);
+          return [];
+        }
+      } catch (error) {
+        console.log(`Comments query format ${index + 1} failed:`, error.message);
+        if (index === queries.length - 1) {
+          console.error(`All comment query formats failed for item ${itemId}:`, error.message);
         }
       }
-    `;
-
-    try {
-      const response = await this.graphqlClient.request(query, { id: itemId });
-      return response.item?.comments || [];
-    } catch (error) {
-      console.error(`Error fetching comments for item ${itemId}:`, error.message);
-      return [];
     }
+
+    return [];
   }
 
   // Extract YouTube URLs and convert to Yewtu.be
   convertYouTubeUrls(text) {
+    if (!text) return [];
+    
     const matches = [];
     let match;
+    
+    // Reset regex lastIndex to avoid issues with global regex
+    this.youtubeRegex.lastIndex = 0;
     
     while ((match = this.youtubeRegex.exec(text)) !== null) {
       const videoId = match[1];
@@ -388,6 +440,15 @@ class StackerNewsBot {
             text
           }
         }
+      `,
+      // Alternative format with body field
+      `
+        mutation CreateComment($body: String!, $parentId: ID!) {
+          createComment(body: $body, parentId: $parentId) {
+            id
+            text
+          }
+        }
       `
     ];
 
@@ -400,8 +461,10 @@ class StackerNewsBot {
           variables = { text: commentText, parentId: parentId };
         } else if (index === 1) {
           variables = { input: { text: commentText, parentId: parentId } };
-        } else {
+        } else if (index === 2) {
           variables = { content: commentText, parentId: parentId };
+        } else {
+          variables = { body: commentText, parentId: parentId };
         }
 
         const response = await this.graphqlClient.request(mutation, variables);
@@ -441,11 +504,8 @@ class StackerNewsBot {
       }
     }
 
-    // Check comments - either from the initial fetch or fetch separately
-    let comments = item.comments || [];
-    if (comments.length === 0) {
-      comments = await this.fetchItemComments(item.id);
-    }
+    // Fetch comments separately since they're not included in the initial query
+    const comments = await this.fetchItemComments(item.id);
 
     for (const comment of comments) {
       const commentKey = `${comment.id}-${comment.createdAt}`;
@@ -474,6 +534,12 @@ class StackerNewsBot {
     try {
       const items = await this.fetchRecentContent();
       console.log(`✓ Items query working - fetched ${items.length} items`);
+      
+      // Test comments query with first item if available
+      if (items.length > 0) {
+        const comments = await this.fetchItemComments(items[0].id);
+        console.log(`✓ Comments query working - fetched ${comments.length} comments for item ${items[0].id}`);
+      }
     } catch (error) {
       console.log('✗ Items query failed:', error.message);
     }
