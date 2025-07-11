@@ -1,13 +1,42 @@
 // bot.js - Stacker.News YouTube to Yewtu.be Bot
 const { GraphQLClient } = require('graphql-request');
-const { getPublicKey, getEventHash, signEvent, generatePrivateKey } = require('nostr-tools');
+const { getPublicKey, getEventHash, signEvent, generatePrivateKey, nip19 } = require('nostr-tools');
 const WebSocket = require('ws');
 
 class StackerNewsBot {
   constructor() {
     this.graphqlClient = new GraphQLClient('https://stacker.news/api/graphql');
     this.processedItems = new Set();
-    this.botPrivateKey = process.env.NOSTR_PRIVATE_KEY || generatePrivateKey();
+    
+    // Handle private key - support both bech32 (nsec1...) and hex formats
+    let privateKey = process.env.NOSTR_PRIVATE_KEY;
+    
+    if (privateKey) {
+      // Handle bech32 format (nsec1...)
+      if (privateKey.startsWith('nsec1')) {
+        try {
+          const decoded = nip19.decode(privateKey);
+          privateKey = decoded.data;
+          console.log('Successfully decoded bech32 private key');
+        } catch (error) {
+          console.error('Invalid bech32 private key format:', error.message);
+          throw new Error('Invalid bech32 private key format');
+        }
+      }
+      
+      // Validate hex format
+      if (typeof privateKey !== 'string' || privateKey.length !== 64) {
+        console.error('Private key must be 64 characters hex string, got:', typeof privateKey, privateKey?.length);
+        throw new Error('Private key must be 64 characters hex string');
+      }
+      
+      this.botPrivateKey = privateKey;
+    } else {
+      // Generate new key if none provided
+      this.botPrivateKey = generatePrivateKey();
+      console.log('Generated new private key');
+    }
+    
     this.botPublicKey = getPublicKey(this.botPrivateKey);
     this.isAuthenticated = false;
     this.authToken = null;
