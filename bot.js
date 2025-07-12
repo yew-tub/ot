@@ -1,312 +1,365 @@
-#!/usr/bin/env node
-
-/**
- * Stacker.News YouTube Link Bot
- * Monitors for YouTube links and posts yewtu.be alternatives
- */
-
-const { getPublicKey, finalizeEvent, verifyEvent } = require('nostr-tools');
-const { GraphQLClient } = require('graphql-request');
-const fs = require('fs').promises;
+const { getPublicKey, finishEvent, relayInit, nip19 } = require('nostr-tools');
+const fetch = require('node-fetch');
+const fs = require('fs');
 const path = require('path');
 
 // Configuration
-const CONFIG = {
-  STACKER_NEWS_API: 'https://stacker.news/api/graphql',
-  YEWTU_BE_BASE: 'https://yewtu.be',
-  COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}',
-  SCAN_LIMIT: 50, // Number of recent posts to scan
-  RATE_LIMIT_DELAY: 2000, // ms between API calls
-  STATE_FILE: './.bot-state.json'
-};
+const RELAY_URL = 'wss://relay.primal.net';
+const STACKER_NEWS_URL = 'https://stacker.news/api/graphql';
+const YOUTUBE_API_BASE = 'https://www.googleapis.com/youtube/v3';
+const CHECK_INTERVAL = 60000; // 1 minute
+const STACKER_NEWS_PROFILE = 'https://stacker.news/yew_tub';
+const PROCESSED_ITEMS_FILE = path.join(__dirname, 'processed_items.json');
+const MAX_RETRIES = 3;
+const RETRY_DELAY = 5000; // 5 seconds
 
-// YouTube URL patterns
-const YOUTUBE_PATTERNS = [
-  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/gi,
-  /(?:https?:\/\/)?(?:www\.)?youtu\.be\/([a-zA-Z0-9_-]{11})/gi,
-  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/gi,
-  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/v\/([a-zA-Z0-9_-]{11})/gi,
-  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi
-];
-
-// GraphQL queries
-const QUERIES = {
-  RECENT_POSTS: `
-    query recentPosts($limit: Int!) {
-      items(sort: "recent", limit: $limit) {
-        id
-        title
-        text
-        url
-        createdAt
-        user {
-          name
+// Load processed items from file
+function loadProcessedItems() {
+    try {
+        if (fs.existsSync(PROCESSED_ITEMS_FILE)) {
+            const data = fs.readFileSync(PROCESSED_ITEMS_FILE, 'utf8');
+            return new Set(JSON.parse(data));
         }
-      }
+    } catch (error) {
+        console.error('Error loading processed items:', error);
     }
-  `,
-  
-  POST_COMMENT: `
-    mutation createComment($id: ID!, $text: String!) {
-      createComment(id: $id, text: $text) {
-        id
-      }
+    return new Set();
+}
+
+// Save processed items to file
+function saveProcessedItems(processedItems) {
+    try {
+        fs.writeFileSync(PROCESSED_ITEMS_FILE, JSON.stringify([...processedItems]));
+    } catch (error) {
+        console.error('Error saving processed items:', error);
     }
-  `
-};
+}
+
+// Helper function to convert nsec1 to hex
+function nsecToHex(nsecKey) {
+    try {
+        const decoded = nip19.decode(nsecKey);
+        if (decoded.type === 'nsec') {
+            return decoded.data;
+        } else {
+            throw new Error('Invalid nsec key type');
+        }
+    } catch (error) {
+        throw new Error(`Failed to decode nsec key: ${error.message}`);
+    }
+}
 
 class StackerNewsBot {
-  constructor() {
-    this.privateKey = this.getPrivateKey();
-    this.publicKey = getPublicKey(this.privateKey);
-    this.client = new GraphQLClient(CONFIG.STACKER_NEWS_API);
-    this.processedPosts = new Set();
-    this.isRunning = false;
-  }
-
-  getPrivateKey() {
-    const privateKey = process.env.NOSTR_PRIVATE_KEY;
-    if (!privateKey) {
-      throw new Error('NOSTR_PRIVATE_KEY environment variable is required');
-    }
-    return privateKey;
-  }
-
-  async loadState() {
-    try {
-      const stateData = await fs.readFile(CONFIG.STATE_FILE, 'utf8');
-      const state = JSON.parse(stateData);
-      this.processedPosts = new Set(state.processedPosts || []);
-      console.log(`Loaded ${this.processedPosts.size} processed posts from state`);
-    } catch (error) {
-      console.log('No previous state found, starting fresh');
-    }
-  }
-
-  async saveState() {
-    const state = {
-      processedPosts: Array.from(this.processedPosts),
-      lastRun: new Date().toISOString()
-    };
-    await fs.writeFile(CONFIG.STATE_FILE, JSON.stringify(state, null, 2));
-    console.log('State saved');
-  }
-
-  extractYouTubeId(text) {
-    if (!text) return null;
-    
-    for (const pattern of YOUTUBE_PATTERNS) {
-      pattern.lastIndex = 0; // Reset regex state
-      const match = pattern.exec(text);
-      if (match) {
-        return match[1];
-      }
-    }
-    return null;
-  }
-
-  convertToYewTube(originalUrl, videoId) {
-    // Preserve query parameters if present
-    const url = new URL(originalUrl);
-    const searchParams = new URLSearchParams(url.search);
-    
-    // Build yewtu.be URL
-    let yewtubeUrl = `${CONFIG.YEWTU_BE_BASE}/watch?v=${videoId}`;
-    
-    // Add timestamp if present
-    if (searchParams.has('t')) {
-      yewtubeUrl += `&t=${searchParams.get('t')}`;
-    }
-    
-    return yewtubeUrl;
-  }
-
-  async authenticateWithNostr() {
-    const authEvent = {
-      kind: 22242,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [
-        ['relay', 'wss://relay.stacker.news'],
-        ['challenge', 'stacker.news']
-      ],
-      content: '',
-      pubkey: this.publicKey
-    };
-
-    const signedEvent = finalizeEvent(authEvent, this.privateKey);
-    
-    // Set authorization header
-    this.client.setHeader('Authorization', `Nostr ${Buffer.from(JSON.stringify(signedEvent)).toString('base64')}`);
-    
-    return signedEvent;
-  }
-
-  async fetchRecentPosts() {
-    try {
-      const response = await this.client.request(QUERIES.RECENT_POSTS, {
-        limit: CONFIG.SCAN_LIMIT
-      });
-      return response.items || [];
-    } catch (error) {
-      console.error('Error fetching posts:', error);
-      return [];
-    }
-  }
-
-  async postComment(postId, text) {
-    try {
-      const response = await this.client.request(QUERIES.POST_COMMENT, {
-        id: postId,
-        text: text
-      });
-      return response.createComment;
-    } catch (error) {
-      console.error('Error posting comment:', error);
-      throw error;
-    }
-  }
-
-  async processPost(post) {
-    if (this.processedPosts.has(post.id)) {
-      return false;
-    }
-
-    const content = `${post.title || ''} ${post.text || ''} ${post.url || ''}`;
-    const videoId = this.extractYouTubeId(content);
-    
-    if (!videoId) {
-      this.processedPosts.add(post.id);
-      return false;
-    }
-
-    // Find the original YouTube URL to convert
-    let originalYouTubeUrl = null;
-    for (const pattern of YOUTUBE_PATTERNS) {
-      pattern.lastIndex = 0;
-      const match = pattern.exec(content);
-      if (match) {
-        originalYouTubeUrl = match[0];
-        break;
-      }
-    }
-
-    if (!originalYouTubeUrl) {
-      this.processedPosts.add(post.id);
-      return false;
-    }
-
-    try {
-      const yewtubeUrl = this.convertToYewTube(originalYouTubeUrl, videoId);
-      const commentText = CONFIG.COMMENT_TEMPLATE.replace('{link}', yewtubeUrl);
-      
-      console.log(`Found YouTube link in post ${post.id}: ${originalYouTubeUrl}`);
-      console.log(`Posting comment with yewtu.be alternative: ${yewtubeUrl}`);
-      
-      await this.postComment(post.id, commentText);
-      this.processedPosts.add(post.id);
-      
-      console.log(`Successfully posted comment on post ${post.id}`);
-      return true;
-    } catch (error) {
-      console.error(`Failed to post comment on post ${post.id}:`, error);
-      // Mark as processed to avoid retry loops
-      this.processedPosts.add(post.id);
-      return false;
-    }
-  }
-
-  async run() {
-    if (this.isRunning) {
-      console.log('Bot is already running');
-      return;
-    }
-
-    this.isRunning = true;
-    
-    try {
-      console.log('Starting Stacker.News YouTube Bot...');
-      console.log(`Bot public key: ${this.publicKey}`);
-      
-      // Load previous state
-      await this.loadState();
-      
-      // Authenticate with Nostr
-      console.log('Authenticating with Nostr...');
-      await this.authenticateWithNostr();
-      
-      // Fetch recent posts
-      console.log('Fetching recent posts...');
-      const posts = await this.fetchRecentPosts();
-      console.log(`Found ${posts.length} recent posts`);
-      
-      let processedCount = 0;
-      let commentedCount = 0;
-      
-      // Process each post
-      for (const post of posts) {
-        const result = await this.processPost(post);
-        if (result) {
-          commentedCount++;
-        }
-        processedCount++;
+    constructor() {
+        // Handle both nsec1 and hex format private keys
+        let privateKey = process.env.NOSTR_PRIVATE_KEY;
         
-        // Rate limiting
-        if (processedCount < posts.length) {
-          await this.sleep(CONFIG.RATE_LIMIT_DELAY);
+        if (!privateKey) {
+            throw new Error('NOSTR_PRIVATE_KEY environment variable is required');
         }
-      }
-      
-      // Save state
-      await this.saveState();
-      
-      console.log(`Run completed: ${processedCount} posts processed, ${commentedCount} comments posted`);
-      
-    } catch (error) {
-      console.error('Bot run failed:', error);
-      process.exit(1);
-    } finally {
-      this.isRunning = false;
+        
+        // Convert nsec1 to hex if needed
+        if (privateKey.startsWith('nsec1')) {
+            console.log('Converting nsec1 private key to hex format...');
+            privateKey = nsecToHex(privateKey);
+        }
+        
+        this.privateKey = privateKey;
+        this.publicKey = getPublicKey(privateKey);
+        this.relay = null;
+        this.processedItems = loadProcessedItems();
+        
+        console.log('Bot initialized with public key:', this.publicKey);
     }
-  }
 
-  sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
+    async connectToRelay() {
+        try {
+            this.relay = relayInit(RELAY_URL);
+            
+            await new Promise((resolve, reject) => {
+                this.relay.on('connect', () => {
+                    console.log('Connected to relay:', RELAY_URL);
+                    resolve();
+                });
+                
+                this.relay.on('error', (err) => {
+                    console.error('Relay connection error:', err);
+                    reject(err);
+                });
+                
+                this.relay.connect();
+            });
+            
+        } catch (error) {
+            console.error('Failed to connect to relay:', error);
+            throw error;
+        }
+    }
 
-  async cleanup() {
-    console.log('Cleaning up...');
-    await this.saveState();
-  }
+    async fetchStackerNewsItems() {
+        const query = `
+            query {
+                items(sort: "recent", limit: 10) {
+                    id
+                    title
+                    url
+                    createdAt
+                    user {
+                        name
+                    }
+                }
+            }
+        `;
+
+        try {
+            const response = await fetch(STACKER_NEWS_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ query })
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            return data.data.items || [];
+        } catch (error) {
+            console.error('Error fetching Stacker News items:', error);
+            return [];
+        }
+    }
+
+    isYouTubeURL(url) {
+        if (!url) return false;
+        return url.includes('youtube.com') || url.includes('youtu.be');
+    }
+
+    async getYouTubeVideoId(url) {
+        try {
+            const urlObj = new URL(url);
+            
+            if (urlObj.hostname === 'youtu.be') {
+                return urlObj.pathname.slice(1);
+            } else if (urlObj.hostname === 'www.youtube.com' || urlObj.hostname === 'youtube.com') {
+                return urlObj.searchParams.get('v');
+            }
+        } catch (error) {
+            console.error('Error parsing YouTube URL:', error);
+        }
+        return null;
+    }
+
+    async getYouTubeVideoInfo(videoId) {
+        const API_KEY = process.env.YOUTUBE_API_KEY;
+        if (!API_KEY) {
+            console.warn('YouTube API key not found. Using basic info.');
+            return null;
+        }
+
+        try {
+            const response = await fetch(
+                `${YOUTUBE_API_BASE}/videos?id=${videoId}&key=${API_KEY}&part=snippet,statistics`
+            );
+
+            if (!response.ok) {
+                throw new Error(`YouTube API error: ${response.status}`);
+            }
+
+            const data = await response.json();
+            if (data.items && data.items.length > 0) {
+                const video = data.items[0];
+                return {
+                    title: video.snippet.title,
+                    channelTitle: video.snippet.channelTitle,
+                    description: video.snippet.description,
+                    viewCount: video.statistics.viewCount,
+                    likeCount: video.statistics.likeCount,
+                    duration: video.contentDetails?.duration
+                };
+            }
+        } catch (error) {
+            console.error('Error fetching YouTube video info:', error);
+        }
+        return null;
+    }
+
+    async publishToNostr(item, youtubeInfo) {
+        try {
+            let content = `📺 YouTube Video Shared on Stacker News\n\n`;
+            content += `"${item.title}"\n`;
+            content += `by ${item.user.name}\n\n`;
+            
+            if (youtubeInfo) {
+                content += `🎬 ${youtubeInfo.title}\n`;
+                content += `📺 ${youtubeInfo.channelTitle}\n`;
+                if (youtubeInfo.viewCount) {
+                    content += `👀 ${parseInt(youtubeInfo.viewCount).toLocaleString()} views\n`;
+                }
+                content += `\n`;
+            }
+            
+            content += `🔗 ${item.url}\n`;
+            content += `💬 Discuss on Stacker News: https://stacker.news/items/${item.id}\n\n`;
+            content += `#YouTube #StackerNews #Bitcoin\n\n`;
+            content += `🤖 This post was automatically shared from ${STACKER_NEWS_PROFILE}`;
+
+            const event = {
+                kind: 1,
+                created_at: Math.floor(Date.now() / 1000),
+                tags: [
+                    ['t', 'youtube'],
+                    ['t', 'stackernews'],
+                    ['t', 'bitcoin'],
+                    ['r', item.url]
+                ],
+                content: content,
+                pubkey: this.publicKey,
+            };
+
+            const signedEvent = finishEvent(event, this.privateKey);
+            
+            // Publish to relay
+            const pub = this.relay.publish(signedEvent);
+            
+            await new Promise((resolve, reject) => {
+                pub.on('ok', () => {
+                    console.log('✅ Successfully published to Nostr');
+                    resolve();
+                });
+                
+                pub.on('failed', (reason) => {
+                    console.error('❌ Failed to publish to Nostr:', reason);
+                    reject(new Error(reason));
+                });
+                
+                // Timeout after 10 seconds
+                setTimeout(() => {
+                    reject(new Error('Publish timeout'));
+                }, 10000);
+            });
+
+            return true;
+        } catch (error) {
+            console.error('Error publishing to Nostr:', error);
+            return false;
+        }
+    }
+
+    async processNewItems() {
+        console.log('🔍 Checking for new YouTube videos on Stacker News...');
+        
+        const items = await this.fetchStackerNewsItems();
+        let newItemsFound = 0;
+
+        for (const item of items) {
+            if (this.processedItems.has(item.id)) {
+                continue;
+            }
+
+            if (this.isYouTubeURL(item.url)) {
+                console.log(`📺 Found YouTube video: ${item.title}`);
+                
+                const videoId = await this.getYouTubeVideoId(item.url);
+                let youtubeInfo = null;
+                
+                if (videoId) {
+                    youtubeInfo = await this.getYouTubeVideoInfo(videoId);
+                }
+
+                let retryCount = 0;
+                let success = false;
+
+                while (retryCount < MAX_RETRIES && !success) {
+                    try {
+                        success = await this.publishToNostr(item, youtubeInfo);
+                        
+                        if (success) {
+                            this.processedItems.add(item.id);
+                            newItemsFound++;
+                            console.log(`✅ Successfully processed: ${item.title}`);
+                        } else {
+                            retryCount++;
+                            if (retryCount < MAX_RETRIES) {
+                                console.log(`⏳ Retrying in ${RETRY_DELAY/1000} seconds... (${retryCount}/${MAX_RETRIES})`);
+                                await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+                            }
+                        }
+                    } catch (error) {
+                        retryCount++;
+                        console.error(`❌ Error processing item (attempt ${retryCount}/${MAX_RETRIES}):`, error);
+                        
+                        if (retryCount < MAX_RETRIES) {
+                            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+                        }
+                    }
+                }
+
+                if (!success) {
+                    console.error(`❌ Failed to process item after ${MAX_RETRIES} attempts: ${item.title}`);
+                }
+            }
+        }
+
+        if (newItemsFound > 0) {
+            saveProcessedItems(this.processedItems);
+            console.log(`✅ Processed ${newItemsFound} new YouTube video(s)`);
+        } else {
+            console.log('ℹ️ No new YouTube videos found');
+        }
+    }
+
+    async start() {
+        console.log('🚀 Starting Stacker News YouTube Bot...');
+        
+        try {
+            await this.connectToRelay();
+            console.log('✅ Bot connected and ready!');
+            
+            // Initial check
+            await this.processNewItems();
+            
+            // Set up interval for continuous checking
+            setInterval(async () => {
+                try {
+                    await this.processNewItems();
+                } catch (error) {
+                    console.error('Error in scheduled check:', error);
+                }
+            }, CHECK_INTERVAL);
+            
+        } catch (error) {
+            console.error('❌ Failed to start bot:', error);
+            process.exit(1);
+        }
+    }
 }
 
-// Main execution
+// Main function
 async function main() {
-  const bot = new StackerNewsBot();
-  
-  // Handle graceful shutdown
-  process.on('SIGINT', async () => {
-    console.log('\nReceived SIGINT, shutting down gracefully...');
-    await bot.cleanup();
-    process.exit(0);
-  });
-  
-  process.on('SIGTERM', async () => {
-    console.log('\nReceived SIGTERM, shutting down gracefully...');
-    await bot.cleanup();
-    process.exit(0);
-  });
-  
-  try {
-    await bot.run();
-  } catch (error) {
-    console.error('Fatal error:', error);
-    process.exit(1);
-  }
+    try {
+        const bot = new StackerNewsBot();
+        await bot.start();
+    } catch (error) {
+        console.error('❌ Bot failed to start:', error);
+        process.exit(1);
+    }
 }
 
-// Run if called directly
+// Handle graceful shutdown
+process.on('SIGINT', () => {
+    console.log('\n👋 Bot shutting down gracefully...');
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n👋 Bot shutting down gracefully...');
+    process.exit(0);
+});
+
+// Start the bot
 if (require.main === module) {
-  main();
+    main();
 }
-
-module.exports = StackerNewsBot;
