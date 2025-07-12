@@ -1,104 +1,28 @@
-# Stacker.News YouTube to Yewtu.be Bot
+# Stacker.News YouTube Bot
 
 A bot that monitors [Stacker.News](https://stacker.news) for YouTube links and automatically posts comments with privacy-friendly [Yewtu.be](https://yewtu.be) alternatives.
 
 ## Features
 
-- 🔍 Monitors Stacker.News posts and comments for YouTube links
-- 🔄 Automatically converts YouTube URLs to Yewtu.be alternatives
-- 🔐 Authenticates via Nostr protocol
-- 💬 Posts helpful comments with alternative links
-- ⚡ Runs on GitHub Actions (free tier compatible)
-- 🚀 Easy deployment to GitHub Pages/Actions
+- 🔍 **Smart Detection**: Monitors new posts for YouTube links in various formats
+- 🔄 **Automatic Conversion**: Converts YouTube URLs to Yewtu.be alternatives
+- 🔐 **Nostr Authentication**: Uses Nostr protocol for secure authentication
+- 💬 **Helpful Comments**: Posts informative comments with alternative links
+- ⚡ **GitHub Actions**: Runs automatically every 10 minutes
+- 🚀 **Easy Setup**: Simple configuration and deployment
+- 📁 **State Management**: Remembers processed posts to avoid duplicates
+- 🛡️ **Rate Limiting**: Built-in delays to respect API limits
 
-## How it works
+## How It Works
 
-1. The bot scans recent posts and comments on Stacker.News
-2. Detects YouTube links in various formats (youtube.com, youtu.be, etc.)
-3. Converts them to Yewtu.be equivalents
-4. Posts a comment with the privacy-friendly alternative
-5. Runs every 10 minutes via GitHub Actions
+1. **Monitoring**: Scans recent posts on Stacker.News
+2. **Detection**: Identifies YouTube links using regex patterns
+3. **Conversion**: Converts YouTube URLs to Yewtu.be equivalents
+4. **Authentication**: Uses Nostr keys to authenticate with Stacker.News
+5. **Commenting**: Posts helpful comments with privacy-friendly alternatives
+6. **State Tracking**: Saves processed posts to avoid duplicate comments
 
-## Setup
-
-### 1. Fork/Clone this repository
-
-```bash
-git clone https://github.com/yourusername/stacker-news-youtube-bot.git
-cd stacker-news-youtube-bot
-```
-
-### 2. Generate Nostr Keys
-
-You'll need a Nostr private key to authenticate with Stacker.News. You can:
-
-**Option A: Generate new keys**
-```bash
-npm install
-node -e "
-const { generatePrivateKey, getPublicKey } = require('nostr-tools');
-const privKey = generatePrivateKey();
-const pubKey = getPublicKey(privKey);
-console.log('Private Key:', privKey);
-console.log('Public Key:', pubKey);
-"
-```
-
-**Option B: Use existing Nostr keys**
-If you already have a Nostr key pair, you can use your existing private key.
-
-### 3. Set up Stacker.News Account
-
-1. Go to [Stacker.News](https://stacker.news)
-2. Sign up/sign in using your Nostr public key
-3. Make sure your account has some sats for posting comments
-
-### 4. Configure GitHub Secrets
-
-In your GitHub repository:
-
-1. Go to Settings → Secrets and variables → Actions
-2. Add a new repository secret:
-   - **Name**: `NOSTR_PRIVATE_KEY`
-   - **Value**: Your Nostr private key (hex format)
-
-### 5. Deploy
-
-The bot will automatically start running when you push to the main branch. It's configured to:
-- Run every 10 minutes via cron schedule
-- Can be triggered manually from the Actions tab
-- Runs a single scan per execution (GitHub Actions friendly)
-
-## Local Development
-
-```bash
-# Install dependencies
-npm install
-
-# Run the bot locally
-npm start
-
-# Run with auto-restart during development
-npm run dev
-```
-
-## Configuration
-
-### Environment Variables
-
-- `NOSTR_PRIVATE_KEY`: Your Nostr private key (required for posting comments)
-- `NODE_ENV`: Set to 'production' in GitHub Actions
-
-### Customization
-
-You can modify the bot behavior by editing `bot.js`:
-
-- Change the monitoring frequency
-- Modify the comment template
-- Adjust rate limiting delays
-- Filter specific YouTube domains
-
-## YouTube URL Detection
+## Supported YouTube Formats
 
 The bot detects these YouTube URL formats:
 - `https://www.youtube.com/watch?v=VIDEO_ID`
@@ -107,7 +31,88 @@ The bot detects these YouTube URL formats:
 - `https://youtube.com/v/VIDEO_ID`
 - `https://youtube.com/shorts/VIDEO_ID`
 
-## Example Response
+## Setup Instructions
+
+### 1. Generate Nostr Keys
+
+You'll need a Nostr key pair for authentication. Choose one option:
+
+**Option A: Generate new keys**
+```bash
+npm install
+npm run generate-keys
+```
+
+**Option B: Use existing keys**
+If you already have Nostr keys, you can use your existing private key.
+
+### 2. Setup Stacker.News Account
+
+1. Go to [Stacker.News](https://stacker.news)
+2. Sign up/sign in using your Nostr public key
+3. Add some sats to your account (required for posting comments)
+
+### 3. Configure GitHub Repository
+
+1. Fork this repository
+2. Go to your repository's **Settings** → **Secrets and variables** → **Actions**
+3. Add a new repository secret:
+   - **Name**: `NOSTR_PRIVATE_KEY`
+   - **Value**: Your Nostr private key (hex format)
+
+### 4. Deploy
+
+The bot will automatically start running when you push to the main branch. It's configured to:
+- Run every 10 minutes via cron schedule
+- Can be triggered manually from the Actions tab
+- Automatically handles state persistence
+
+## Local Development
+
+### Installation
+
+```bash
+git clone https://github.com/yew-tub/ot.git
+cd ot
+npm install
+```
+
+### Configuration
+
+Create a `.env` file (optional for local development):
+```bash
+NOSTR_PRIVATE_KEY=your_private_key_here
+```
+
+### Running
+
+```bash
+# Run once
+npm start
+
+# Run with auto-restart during development
+npm run dev
+
+# Generate new Nostr keys
+npm run generate-keys
+```
+
+## Configuration Options
+
+You can modify the bot behavior by editing `bot.js`:
+
+```javascript
+const CONFIG = {
+  STACKER_NEWS_API: 'https://stacker.news/api/graphql',
+  YEWTU_BE_BASE: 'https://yewtu.be',
+  COMMENT_TEMPLATE: '🔗 Alternative link: {link}\n\n*Privacy-friendly YouTube alternative via Yewtu.be*',
+  SCAN_LIMIT: 50, // Number of recent posts to scan
+  RATE_LIMIT_DELAY: 2000, // ms between API calls
+  STATE_FILE: './.bot-state.json'
+};
+```
+
+## Example Bot Comment
 
 When the bot detects a YouTube link, it posts a comment like:
 
@@ -117,21 +122,52 @@ When the bot detects a YouTube link, it posts a comment like:
 *Privacy-friendly YouTube alternative via Yewtu.be*
 ```
 
-## GitHub Actions Workflow
+## GitHub Actions Details
 
-The bot uses GitHub Actions for deployment:
-
+The bot uses GitHub Actions for automated deployment:
 - **Schedule**: Runs every 10 minutes
-- **Manual trigger**: Can be started from Actions tab
+- **Manual Trigger**: Can be started from Actions tab
 - **Timeout**: 9 minutes per run (GitHub Actions limit)
-- **Rate limiting**: Built-in delays to avoid API limits
+- **State Persistence**: Uses GitHub Actions cache for state storage
+- **Error Handling**: Uploads logs on failure
 
-## Limitations
+## Troubleshooting
 
-- GitHub Actions free tier has usage limits
-- Rate limited to avoid spamming Stacker.News
-- Requires sats in your Stacker.News account for commenting
-- Single scan per execution (not continuously running)
+### Common Issues
+
+1. **Bot not posting comments**
+   - Check that your Nostr private key is correct
+   - Verify your Stacker.News account has sufficient sats
+   - Check the GitHub Actions logs for error messages
+
+2. **Authentication errors**
+   - Ensure your Nostr private key is in the correct hex format
+   - Verify the key corresponds to your Stacker.News account
+
+3. **Rate limiting**
+   - The bot includes built-in delays to avoid API limits
+   - If you're hitting limits, increase `RATE_LIMIT_DELAY`
+
+### Debug Mode
+
+You can enable debug logging when running manually:
+1. Go to the Actions tab in your repository
+2. Click "Run workflow" on the bot workflow
+3. Check the "Enable debug logging" option
+
+### Checking Logs
+
+- GitHub Actions logs are available in the Actions tab
+- Failed runs automatically upload logs as artifacts
+- Local runs output to console
+
+## Privacy and Ethics
+
+This bot is designed to:
+- Promote privacy-friendly alternatives to YouTube
+- Respect Stacker.News community guidelines
+- Avoid spam through intelligent state management
+- Provide helpful information to users
 
 ## Contributing
 
@@ -145,14 +181,14 @@ The bot uses GitHub Actions for deployment:
 
 MIT License - feel free to use and modify as needed.
 
-## Disclaimer
-
-This bot is for educational and utility purposes. Please use responsibly and respect Stacker.News community guidelines. Make sure you have sufficient sats in your account for commenting.
-
 ## Support
 
 If you encounter issues:
-1. Check the GitHub Actions logs
-2. Verify your Nostr private key is correct
-3. Ensure your Stacker.News account has sats
-4. Open an issue in this repository
+- Check the GitHub Actions logs
+- Verify your Nostr configuration
+- Ensure your Stacker.News account has sats
+- Open an issue in this repository
+
+---
+
+**Note**: This bot is for educational and utility purposes. Please use responsibly and respect Stacker.News community guidelines.
