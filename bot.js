@@ -1,612 +1,312 @@
-// bot.js - Updated Stacker.News YouTube to Yewtu.be Bot
+#!/usr/bin/env node
+
+/**
+ * Stacker.News YouTube Link Bot
+ * Monitors for YouTube links and posts yewtu.be alternatives
+ */
+
+const { getPublicKey, finalizeEvent, verifyEvent } = require('nostr-tools');
 const { GraphQLClient } = require('graphql-request');
-const { getPublicKey, getEventHash, signEvent, generatePrivateKey, nip19 } = require('nostr-tools');
+const fs = require('fs').promises;
+const path = require('path');
+
+// Configuration
+const CONFIG = {
+  STACKER_NEWS_API: 'https://stacker.news/api/graphql',
+  YEWTU_BE_BASE: 'https://yewtu.be',
+  COMMENT_TEMPLATE: '🔗 Alternative link: {link}\n\n*Privacy-friendly YouTube alternative via Yewtu.be*',
+  SCAN_LIMIT: 50, // Number of recent posts to scan
+  RATE_LIMIT_DELAY: 2000, // ms between API calls
+  STATE_FILE: './.bot-state.json'
+};
+
+// YouTube URL patterns
+const YOUTUBE_PATTERNS = [
+  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/gi,
+  /(?:https?:\/\/)?(?:www\.)?youtu\.be\/([a-zA-Z0-9_-]{11})/gi,
+  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/gi,
+  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/v\/([a-zA-Z0-9_-]{11})/gi,
+  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi
+];
+
+// GraphQL queries
+const QUERIES = {
+  RECENT_POSTS: `
+    query recentPosts($limit: Int!) {
+      items(sort: "recent", limit: $limit) {
+        id
+        title
+        text
+        url
+        createdAt
+        user {
+          name
+        }
+      }
+    }
+  `,
+  
+  POST_COMMENT: `
+    mutation createComment($id: ID!, $text: String!) {
+      createComment(id: $id, text: $text) {
+        id
+      }
+    }
+  `
+};
 
 class StackerNewsBot {
   constructor() {
-    this.graphqlClient = new GraphQLClient('https://stacker.news/api/graphql');
-    this.processedItems = new Set();
-    
-    // Handle private key - support both bech32 (nsec1...) and hex formats
-    let privateKey = process.env.NOSTR_PRIVATE_KEY;
-    
-    if (privateKey) {
-      // Handle bech32 format (nsec1...)
-      if (privateKey.startsWith('nsec1')) {
-        try {
-          const decoded = nip19.decode(privateKey);
-          privateKey = decoded.data;
-          console.log('Successfully decoded bech32 private key');
-        } catch (error) {
-          console.error('Invalid bech32 private key format:', error.message);
-          throw new Error('Invalid bech32 private key format');
-        }
-      }
-      
-      // Validate hex format
-      if (typeof privateKey !== 'string' || privateKey.length !== 64) {
-        console.error('Private key must be 64 characters hex string, got:', typeof privateKey, privateKey?.length);
-        throw new Error('Private key must be 64 characters hex string');
-      }
-      
-      this.botPrivateKey = privateKey;
-    } else {
-      // Generate new key if none provided
-      this.botPrivateKey = generatePrivateKey();
-      console.log('Generated new private key');
-    }
-    
-    this.botPublicKey = getPublicKey(this.botPrivateKey);
-    this.isAuthenticated = false;
-    this.authToken = null;
-    
-    // YouTube URL regex patterns
-    this.youtubeRegex = /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/v\/|youtube\.com\/shorts\/)([a-zA-Z0-9_-]{11})/g;
+    this.privateKey = this.getPrivateKey();
+    this.publicKey = getPublicKey(this.privateKey);
+    this.client = new GraphQLClient(CONFIG.STACKER_NEWS_API);
+    this.processedPosts = new Set();
+    this.isRunning = false;
   }
 
-  // Test the GraphQL endpoint with a simple query
-  async testGraphQLEndpoint() {
-    const testQuery = `
-      query TestQuery {
-        __schema {
-          queryType {
-            name
-          }
-        }
+  getPrivateKey() {
+    const privateKey = process.env.NOSTR_PRIVATE_KEY;
+    if (!privateKey) {
+      throw new Error('NOSTR_PRIVATE_KEY environment variable is required');
+    }
+    return privateKey;
+  }
+
+  async loadState() {
+    try {
+      const stateData = await fs.readFile(CONFIG.STATE_FILE, 'utf8');
+      const state = JSON.parse(stateData);
+      this.processedPosts = new Set(state.processedPosts || []);
+      console.log(`Loaded ${this.processedPosts.size} processed posts from state`);
+    } catch (error) {
+      console.log('No previous state found, starting fresh');
+    }
+  }
+
+  async saveState() {
+    const state = {
+      processedPosts: Array.from(this.processedPosts),
+      lastRun: new Date().toISOString()
+    };
+    await fs.writeFile(CONFIG.STATE_FILE, JSON.stringify(state, null, 2));
+    console.log('State saved');
+  }
+
+  extractYouTubeId(text) {
+    if (!text) return null;
+    
+    for (const pattern of YOUTUBE_PATTERNS) {
+      pattern.lastIndex = 0; // Reset regex state
+      const match = pattern.exec(text);
+      if (match) {
+        return match[1];
       }
-    `;
+    }
+    return null;
+  }
+
+  convertToYewTube(originalUrl, videoId) {
+    // Preserve query parameters if present
+    const url = new URL(originalUrl);
+    const searchParams = new URLSearchParams(url.search);
+    
+    // Build yewtu.be URL
+    let yewtubeUrl = `${CONFIG.YEWTU_BE_BASE}/watch?v=${videoId}`;
+    
+    // Add timestamp if present
+    if (searchParams.has('t')) {
+      yewtubeUrl += `&t=${searchParams.get('t')}`;
+    }
+    
+    return yewtubeUrl;
+  }
+
+  async authenticateWithNostr() {
+    const authEvent = {
+      kind: 22242,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ['relay', 'wss://relay.stacker.news'],
+        ['challenge', 'stacker.news']
+      ],
+      content: '',
+      pubkey: this.publicKey
+    };
+
+    const signedEvent = finalizeEvent(authEvent, this.privateKey);
+    
+    // Set authorization header
+    this.client.setHeader('Authorization', `Nostr ${Buffer.from(JSON.stringify(signedEvent)).toString('base64')}`);
+    
+    return signedEvent;
+  }
+
+  async fetchRecentPosts() {
+    try {
+      const response = await this.client.request(QUERIES.RECENT_POSTS, {
+        limit: CONFIG.SCAN_LIMIT
+      });
+      return response.items || [];
+    } catch (error) {
+      console.error('Error fetching posts:', error);
+      return [];
+    }
+  }
+
+  async postComment(postId, text) {
+    try {
+      const response = await this.client.request(QUERIES.POST_COMMENT, {
+        id: postId,
+        text: text
+      });
+      return response.createComment;
+    } catch (error) {
+      console.error('Error posting comment:', error);
+      throw error;
+    }
+  }
+
+  async processPost(post) {
+    if (this.processedPosts.has(post.id)) {
+      return false;
+    }
+
+    const content = `${post.title || ''} ${post.text || ''} ${post.url || ''}`;
+    const videoId = this.extractYouTubeId(content);
+    
+    if (!videoId) {
+      this.processedPosts.add(post.id);
+      return false;
+    }
+
+    // Find the original YouTube URL to convert
+    let originalYouTubeUrl = null;
+    for (const pattern of YOUTUBE_PATTERNS) {
+      pattern.lastIndex = 0;
+      const match = pattern.exec(content);
+      if (match) {
+        originalYouTubeUrl = match[0];
+        break;
+      }
+    }
+
+    if (!originalYouTubeUrl) {
+      this.processedPosts.add(post.id);
+      return false;
+    }
 
     try {
-      const response = await this.graphqlClient.request(testQuery);
-      console.log('GraphQL endpoint is accessible');
+      const yewtubeUrl = this.convertToYewTube(originalYouTubeUrl, videoId);
+      const commentText = CONFIG.COMMENT_TEMPLATE.replace('{link}', yewtubeUrl);
+      
+      console.log(`Found YouTube link in post ${post.id}: ${originalYouTubeUrl}`);
+      console.log(`Posting comment with yewtu.be alternative: ${yewtubeUrl}`);
+      
+      await this.postComment(post.id, commentText);
+      this.processedPosts.add(post.id);
+      
+      console.log(`Successfully posted comment on post ${post.id}`);
       return true;
     } catch (error) {
-      console.error('GraphQL endpoint test failed:', error.message);
+      console.error(`Failed to post comment on post ${post.id}:`, error);
+      // Mark as processed to avoid retry loops
+      this.processedPosts.add(post.id);
       return false;
     }
   }
 
-  // Authenticate with Stacker.News using Nostr
-  async authenticate() {
-    try {
-      console.log('Authenticating with Stacker.News...');
-      
-      // Test endpoint first
-      const endpointWorking = await this.testGraphQLEndpoint();
-      if (!endpointWorking) {
-        console.error('GraphQL endpoint is not accessible');
-        return false;
-      }
-      
-      // Create authentication event
-      const authEvent = {
-        kind: 1,
-        created_at: Math.floor(Date.now() / 1000),
-        tags: [
-          ['p', this.botPublicKey],
-          ['t', 'stacker-news-auth']
-        ],
-        content: `Authenticating bot for YouTube -> Yewtu.be conversion`,
-        pubkey: this.botPublicKey
-      };
-
-      authEvent.id = getEventHash(authEvent);
-      authEvent.sig = signEvent(authEvent, this.botPrivateKey);
-
-      // Try different authentication mutation formats
-      const authMutations = [
-        // Current format
-        `
-          mutation AuthNostr($event: String!) {
-            authNostr(event: $event) {
-              token
-              user {
-                id
-                name
-              }
-            }
-          }
-        `,
-        // Alternative format with eventData
-        `
-          mutation AuthNostr($eventData: String!) {
-            authNostr(eventData: $eventData) {
-              token
-              user {
-                id
-                name
-              }
-            }
-          }
-        `,
-        // Alternative format with input object
-        `
-          mutation AuthNostr($input: AuthNostrInput!) {
-            authNostr(input: $input) {
-              token
-              user {
-                id
-                name
-              }
-            }
-          }
-        `
-      ];
-
-      for (const [index, authMutation] of authMutations.entries()) {
-        try {
-          console.log(`Trying authentication method ${index + 1}...`);
-          
-          let variables;
-          if (index === 0) {
-            variables = { event: JSON.stringify(authEvent) };
-          } else if (index === 1) {
-            variables = { eventData: JSON.stringify(authEvent) };
-          } else {
-            variables = { input: { event: JSON.stringify(authEvent) } };
-          }
-
-          const response = await this.graphqlClient.request(authMutation, variables);
-
-          if (response.authNostr?.token) {
-            this.authToken = response.authNostr.token;
-            this.isAuthenticated = true;
-            this.graphqlClient.setHeader('Authorization', `Bearer ${this.authToken}`);
-            console.log('Successfully authenticated with Stacker.News');
-            return true;
-          }
-        } catch (error) {
-          console.log(`Authentication method ${index + 1} failed:`, error.message);
-          if (index === authMutations.length - 1) {
-            console.error('All authentication methods failed');
-          }
-        }
-      }
-
-      return false;
-    } catch (error) {
-      console.error('Authentication failed:', error);
-      return false;
-    }
-  }
-
-  // Fetch recent posts and comments with improved error handling
-  async fetchRecentContent() {
-    // Try different query formats - removed comments from initial fetch
-    const queries = [
-      // Simplified query without comments (fetch comments separately)
-      {
-        query: `
-          query RecentContent($sort: String!, $when: String!) {
-            items(sort: $sort, when: $when, limit: 50) {
-              items {
-                id
-                title
-                text
-                url
-                createdAt
-                user {
-                  name
-                  id
-                }
-              }
-            }
-          }
-        `,
-        variables: { sort: 'recent', when: 'day' }
-      },
-      // Alternative with different parameter names
-      {
-        query: `
-          query RecentContent($sort: ItemSort!, $when: ItemWhen!) {
-            items(sort: $sort, when: $when, limit: 50) {
-              items {
-                id
-                title
-                text
-                url
-                createdAt
-                user {
-                  name
-                  id
-                }
-              }
-            }
-          }
-        `,
-        variables: { sort: 'RECENT', when: 'DAY' }
-      },
-      // Even simpler query
-      {
-        query: `
-          query RecentContent {
-            items(sort: "recent", when: "day", limit: 50) {
-              items {
-                id
-                title
-                text
-                url
-                createdAt
-                user {
-                  name
-                  id
-                }
-              }
-            }
-          }
-        `,
-        variables: {}
-      }
-    ];
-
-    for (const [index, { query, variables }] of queries.entries()) {
-      try {
-        console.log(`Trying query format ${index + 1}...`);
-        const response = await this.graphqlClient.request(query, variables);
-        
-        if (response.items?.items) {
-          console.log(`Successfully fetched ${response.items.items.length} items`);
-          return response.items.items;
-        }
-      } catch (error) {
-        console.log(`Query format ${index + 1} failed:`, error.message);
-        if (index === queries.length - 1) {
-          console.error('All query formats failed');
-        }
-      }
-    }
-
-    return [];
-  }
-
-  // Fetch comments for a specific item - FIXED QUERY
-  async fetchItemComments(itemId) {
-    // Try different query formats for comments
-    const queries = [
-      // Format 1: Direct item query with comments as items
-      {
-        query: `
-          query ItemComments($id: ID!) {
-            item(id: $id) {
-              id
-              comments {
-                cursor
-                items {
-                  id
-                  text
-                  createdAt
-                  user {
-                    name
-                    id
-                  }
-                }
-              }
-            }
-          }
-        `,
-        variables: { id: itemId }
-      },
-      // Format 2: Using the items query with parent filter
-      {
-        query: `
-          query ItemComments($parentId: ID!) {
-            items(parentId: $parentId, limit: 100) {
-              items {
-                id
-                text
-                createdAt
-                user {
-                  name
-                  id
-                }
-              }
-            }
-          }
-        `,
-        variables: { parentId: itemId }
-      },
-      // Format 3: Simplified comments query
-      {
-        query: `
-          query ItemComments($id: ID!) {
-            item(id: $id) {
-              id
-              comments {
-                items {
-                  id
-                  text
-                  createdAt
-                  user {
-                    name
-                    id
-                  }
-                }
-              }
-            }
-          }
-        `,
-        variables: { id: itemId }
-      },
-      // Format 4: Just get the item structure to understand the schema
-      {
-        query: `
-          query ItemComments($id: ID!) {
-            item(id: $id) {
-              id
-              title
-              text
-              createdAt
-              user {
-                name
-                id
-              }
-            }
-          }
-        `,
-        variables: { id: itemId }
-      }
-    ];
-
-    for (const [index, { query, variables }] of queries.entries()) {
-      try {
-        console.log(`Trying comments query format ${index + 1} for item ${itemId}...`);
-        const response = await this.graphqlClient.request(query, variables);
-        
-        // Handle different response structures
-        if (response.item?.comments?.items) {
-          console.log(`Successfully fetched ${response.item.comments.items.length} comments`);
-          return response.item.comments.items;
-        } else if (response.items?.items) {
-          console.log(`Successfully fetched ${response.items.items.length} comments`);
-          return response.items.items;
-        } else if (response.item) {
-          console.log(`Item ${itemId} fetched but no comments structure found`);
-          return [];
-        }
-      } catch (error) {
-        console.log(`Comments query format ${index + 1} failed:`, error.message);
-        if (index === queries.length - 1) {
-          console.error(`All comment query formats failed for item ${itemId}:`, error.message);
-        }
-      }
-    }
-
-    return [];
-  }
-
-  // Extract YouTube URLs and convert to Yewtu.be
-  convertYouTubeUrls(text) {
-    if (!text) return [];
-    
-    const matches = [];
-    let match;
-    
-    // Reset regex lastIndex to avoid issues with global regex
-    this.youtubeRegex.lastIndex = 0;
-    
-    while ((match = this.youtubeRegex.exec(text)) !== null) {
-      const videoId = match[1];
-      const originalUrl = match[0];
-      const yewtubUrl = `https://yewtu.be/watch?v=${videoId}`;
-      
-      matches.push({
-        original: originalUrl,
-        converted: yewtubUrl,
-        videoId: videoId
-      });
-    }
-    
-    return matches;
-  }
-
-  // Post a comment with Yewtu.be links
-  async postComment(parentId, youtubeLinks) {
-    if (!this.isAuthenticated) {
-      console.log('Not authenticated, skipping comment');
-      return false;
-    }
-
-    const linkText = youtubeLinks.map(link => 
-      `🔗 Alternative link: ${link.converted}`
-    ).join('\n');
-
-    const commentText = `${linkText}\n\n*Privacy-friendly YouTube alternative via Yewtu.be*`;
-
-    // Try different mutation formats
-    const mutations = [
-      // Current format
-      `
-        mutation CreateComment($text: String!, $parentId: ID!) {
-          createComment(text: $text, parentId: $parentId) {
-            id
-            text
-          }
-        }
-      `,
-      // Alternative format with input object
-      `
-        mutation CreateComment($input: CreateCommentInput!) {
-          createComment(input: $input) {
-            id
-            text
-          }
-        }
-      `,
-      // Alternative format with different field names
-      `
-        mutation CreateComment($content: String!, $parentId: ID!) {
-          createComment(content: $content, parentId: $parentId) {
-            id
-            text
-          }
-        }
-      `,
-      // Alternative format with body field
-      `
-        mutation CreateComment($body: String!, $parentId: ID!) {
-          createComment(body: $body, parentId: $parentId) {
-            id
-            text
-          }
-        }
-      `
-    ];
-
-    for (const [index, mutation] of mutations.entries()) {
-      try {
-        console.log(`Trying comment creation method ${index + 1}...`);
-        
-        let variables;
-        if (index === 0) {
-          variables = { text: commentText, parentId: parentId };
-        } else if (index === 1) {
-          variables = { input: { text: commentText, parentId: parentId } };
-        } else if (index === 2) {
-          variables = { content: commentText, parentId: parentId };
-        } else {
-          variables = { body: commentText, parentId: parentId };
-        }
-
-        const response = await this.graphqlClient.request(mutation, variables);
-        
-        if (response.createComment?.id) {
-          console.log(`Posted comment for item ${parentId}:`, response.createComment.id);
-          return true;
-        }
-      } catch (error) {
-        console.log(`Comment creation method ${index + 1} failed:`, error.message);
-        if (index === mutations.length - 1) {
-          console.error('All comment creation methods failed');
-        }
-      }
-    }
-
-    return false;
-  }
-
-  // Process a single item (post or comment)
-  async processItem(item) {
-    const itemKey = `${item.id}-${item.createdAt}`;
-    
-    if (this.processedItems.has(itemKey)) {
+  async run() {
+    if (this.isRunning) {
+      console.log('Bot is already running');
       return;
     }
 
-    // Check post content
-    const postContent = (item.title || '') + ' ' + (item.text || '') + ' ' + (item.url || '');
-    const postYouTubeLinks = this.convertYouTubeUrls(postContent);
+    this.isRunning = true;
     
-    if (postYouTubeLinks.length > 0) {
-      console.log(`Found ${postYouTubeLinks.length} YouTube link(s) in post ${item.id}`);
-      const success = await this.postComment(item.id, postYouTubeLinks);
-      if (success) {
-        this.processedItems.add(itemKey);
-      }
-    }
-
-    // Fetch comments separately since they're not included in the initial query
-    const comments = await this.fetchItemComments(item.id);
-
-    for (const comment of comments) {
-      const commentKey = `${comment.id}-${comment.createdAt}`;
+    try {
+      console.log('Starting Stacker.News YouTube Bot...');
+      console.log(`Bot public key: ${this.publicKey}`);
       
-      if (this.processedItems.has(commentKey)) {
-        continue;
-      }
-
-      const commentYouTubeLinks = this.convertYouTubeUrls(comment.text || '');
+      // Load previous state
+      await this.loadState();
       
-      if (commentYouTubeLinks.length > 0) {
-        console.log(`Found ${commentYouTubeLinks.length} YouTube link(s) in comment ${comment.id}`);
-        const success = await this.postComment(comment.id, commentYouTubeLinks);
-        if (success) {
-          this.processedItems.add(commentKey);
+      // Authenticate with Nostr
+      console.log('Authenticating with Nostr...');
+      await this.authenticateWithNostr();
+      
+      // Fetch recent posts
+      console.log('Fetching recent posts...');
+      const posts = await this.fetchRecentPosts();
+      console.log(`Found ${posts.length} recent posts`);
+      
+      let processedCount = 0;
+      let commentedCount = 0;
+      
+      // Process each post
+      for (const post of posts) {
+        const result = await this.processPost(post);
+        if (result) {
+          commentedCount++;
+        }
+        processedCount++;
+        
+        // Rate limiting
+        if (processedCount < posts.length) {
+          await this.sleep(CONFIG.RATE_LIMIT_DELAY);
         }
       }
+      
+      // Save state
+      await this.saveState();
+      
+      console.log(`Run completed: ${processedCount} posts processed, ${commentedCount} comments posted`);
+      
+    } catch (error) {
+      console.error('Bot run failed:', error);
+      process.exit(1);
+    } finally {
+      this.isRunning = false;
     }
   }
 
-  // Test individual GraphQL operations
-  async testOperations() {
-    console.log('Testing GraphQL operations...');
-    
-    // Test items query
-    try {
-      const items = await this.fetchRecentContent();
-      console.log(`✓ Items query working - fetched ${items.length} items`);
-      
-      // Test comments query with first item if available
-      if (items.length > 0) {
-        const comments = await this.fetchItemComments(items[0].id);
-        console.log(`✓ Comments query working - fetched ${comments.length} comments for item ${items[0].id}`);
-      }
-    } catch (error) {
-      console.log('✗ Items query failed:', error.message);
-    }
-    
-    // Test authentication
-    try {
-      const authSuccess = await this.authenticate();
-      console.log(`${authSuccess ? '✓' : '✗'} Authentication ${authSuccess ? 'successful' : 'failed'}`);
-    } catch (error) {
-      console.log('✗ Authentication failed:', error.message);
-    }
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  // Main monitoring loop
-  async start() {
-    console.log('Starting Stacker.News YouTube Bot...');
-    
-    // Test operations first
-    await this.testOperations();
-    
-    // Try to authenticate
-    const authSuccess = await this.authenticate();
-    if (!authSuccess) {
-      console.log('Authentication failed, running in read-only mode');
-    }
-
-    // Main monitoring loop
-    while (true) {
-      try {
-        console.log('Fetching recent content...');
-        const items = await this.fetchRecentContent();
-        
-        if (items.length === 0) {
-          console.log('No items fetched, waiting before retrying...');
-          await new Promise(resolve => setTimeout(resolve, 2 * 60 * 1000)); // 2 minutes
-          continue;
-        }
-        
-        console.log(`Processing ${items.length} items...`);
-        
-        for (const item of items) {
-          await this.processItem(item);
-          // Add delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 2000)); // 2 seconds
-        }
-        
-        // Clean up old processed items (keep last 1000)
-        if (this.processedItems.size > 1000) {
-          const itemsArray = Array.from(this.processedItems);
-          this.processedItems = new Set(itemsArray.slice(-500));
-        }
-        
-        console.log(`Processed ${items.length} items. Waiting 5 minutes...`);
-        await new Promise(resolve => setTimeout(resolve, 5 * 60 * 1000)); // 5 minutes
-        
-      } catch (error) {
-        console.error('Error in main loop:', error);
-        await new Promise(resolve => setTimeout(resolve, 2 * 60 * 1000)); // Wait 2 minutes on error
-      }
-    }
+  async cleanup() {
+    console.log('Cleaning up...');
+    await this.saveState();
   }
 }
 
-// Run the bot
-if (require.main === module) {
+// Main execution
+async function main() {
   const bot = new StackerNewsBot();
-  bot.start().catch(console.error);
+  
+  // Handle graceful shutdown
+  process.on('SIGINT', async () => {
+    console.log('\nReceived SIGINT, shutting down gracefully...');
+    await bot.cleanup();
+    process.exit(0);
+  });
+  
+  process.on('SIGTERM', async () => {
+    console.log('\nReceived SIGTERM, shutting down gracefully...');
+    await bot.cleanup();
+    process.exit(0);
+  });
+  
+  try {
+    await bot.run();
+  } catch (error) {
+    console.error('Fatal error:', error);
+    process.exit(1);
+  }
+}
+
+// Run if called directly
+if (require.main === module) {
+  main();
 }
 
 module.exports = StackerNewsBot;
