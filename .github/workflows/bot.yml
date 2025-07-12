@@ -4,121 +4,65 @@ on:
   schedule:
     # Run every 10 minutes
     - cron: '*/10 * * * *'
+  
   workflow_dispatch:
-    # Allow manual trigger
+    # Allow manual triggering
     inputs:
-      mode:
-        description: 'Bot mode'
+      debug:
+        description: 'Enable debug logging'
         required: false
-        default: 'single'
-        type: choice
-        options:
-          - single
-          - continuous
-  push:
-    branches: [ main ]
-    paths-ignore:
-      - 'README.md'
-      - '.gitignore'
+        default: 'false'
+        type: boolean
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.mode == 'single'
+    timeout-minutes: 9
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-    
+      
     - name: Setup Node.js
       uses: actions/setup-node@v4
       with:
-        node-version: '18'
+        node-version: '20'
         cache: 'npm'
-    
-    - name: Generate package-lock.json if missing
-      run: |
-        if [ ! -f "package-lock.json" ]; then
-          echo "package-lock.json not found, generating..."
-          npm install
-          git config --global user.email "action@github.com"
-          git config --global user.name "GitHub Action"
-          git add package-lock.json
-          git commit -m "Auto-generate package-lock.json [skip ci]" || echo "No changes to commit"
-          git push || echo "Nothing to push"
-        else
-          echo "package-lock.json exists, using npm ci"
-          npm ci
-        fi
-    
-    - name: Run bot (single scan)
-      env:
-        NOSTR_PRIVATE_KEY: ${{ secrets.NOSTR_PRIVATE_KEY }}
-        NODE_ENV: production
-      run: |
-        timeout 540 node -e "
-        const StackerNewsBot = require('./bot.js');
-        const bot = new StackerNewsBot();
         
-        async function runOnce() {
-          console.log('Running single scan...');
-          
-          const authSuccess = await bot.authenticate();
-          if (!authSuccess) {
-            console.log('Authentication failed, running in read-only mode');
-          }
-          
-          try {
-            const items = await bot.fetchRecentContent();
-            console.log(\`Processing \${items.length} items...\`);
-            
-            for (const item of items) {
-              await bot.processItem(item);
-              await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-            
-            console.log('Single scan completed successfully');
-          } catch (error) {
-            console.error('Error during scan:', error);
-            process.exit(1);
-          }
-        }
-        
-        runOnce().catch(console.error);
-        " || echo "Bot run completed or timed out"
-    
-    - name: Log completion
-      run: echo "Bot execution completed at $(date)"
-
-  # Alternative: Long-running bot (use only one of these jobs)
-  run-bot-continuous:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'continuous'
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '18'
-        cache: 'npm'
-    
     - name: Install dependencies
-      run: |
-        if [ ! -f "package-lock.json" ]; then
-          npm install
-        else
-          npm ci
-        fi
-    
-    - name: Run bot continuously
+      run: npm ci
+      
+    - name: Restore bot state
+      uses: actions/cache/restore@v4
+      with:
+        path: .bot-state.json
+        key: bot-state-${{ github.run_id }}
+        restore-keys: |
+          bot-state-
+          
+    - name: Run bot
       env:
         NOSTR_PRIVATE_KEY: ${{ secrets.NOSTR_PRIVATE_KEY }}
         NODE_ENV: production
       run: |
-        # Run for maximum GitHub Actions time limit (6 hours)
-        timeout 21600 npm start || echo "Bot stopped after timeout"
+        if [ "${{ github.event.inputs.debug }}" == "true" ]; then
+          export DEBUG=true
+        fi
+        npm start
+        
+    - name: Save bot state
+      uses: actions/cache/save@v4
+      if: always()
+      with:
+        path: .bot-state.json
+        key: bot-state-${{ github.run_id }}
+        
+    - name: Upload logs
+      uses: actions/upload-artifact@v4
+      if: failure()
+      with:
+        name: bot-logs-${{ github.run_id }}
+        path: |
+          *.log
+          .bot-state.json
+        retention-days: 7
