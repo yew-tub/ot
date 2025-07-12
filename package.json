@@ -1,35 +1,43 @@
 {
   "name": "stacker-news-youtube-bot",
-  "version": "1.0.0",
-  "description": "Bot that converts YouTube links to Yewtu.be alternatives on Stacker.News",
+  "version": "2.0.0",
+  "description": "A bot that monitors Stacker.News for YouTube links and posts yewtu.be alternatives",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
-    "dev": "nodemon bot.js"
-  },
-  "dependencies": {
-    "graphql-request": "^6.1.0",
-    "nostr-tools": "^1.17.0",
-    "ws": "^8.14.2"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.2"
-  },
-  "engines": {
-    "node": ">=16.0.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/yew-tub/ot.git"
+    "dev": "nodemon bot.js",
+    "test": "jest",
+    "lint": "eslint bot.js",
+    "generate-keys": "node -e \"const { generatePrivateKey, getPublicKey } = require('nostr-tools'); const privKey = generatePrivateKey(); const pubKey = getPublicKey(privKey); console.log('Private Key:', privKey); console.log('Public Key:', pubKey);\""
   },
   "keywords": [
     "stacker-news",
     "youtube",
     "yewtu.be",
-    "privacy",
+    "nostr",
     "bot",
-    "nostr"
+    "privacy"
   ],
   "author": "Your Name",
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "graphql-request": "^6.1.0",
+    "nostr-tools": "^2.1.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2",
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yew-tub/ot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yew-tub/ot/issues"
+  },
+  "homepage": "https://github.com/yew-tub/ot#readme"
 }
