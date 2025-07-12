@@ -29,11 +29,12 @@ const YOUTUBE_PATTERNS = [
   /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi
 ];
 
-// GraphQL queries
+// GraphQL queries - Updated to match current schema
 const QUERIES = {
-  RECENT_POSTS: `
-    query recentPosts($limit: Int!) {
-      items(sort: "recent", limit: $limit) {
+  // Try different possible query structures
+  RECENT_POSTS_V1: `
+    query {
+      items {
         id
         title
         text
@@ -41,6 +42,73 @@ const QUERIES = {
         createdAt
         user {
           name
+        }
+      }
+    }
+  `,
+  
+  RECENT_POSTS_V2: `
+    query recentPosts($first: Int!) {
+      items(first: $first, orderBy: createdAt_DESC) {
+        id
+        title
+        text
+        url
+        createdAt
+        user {
+          name
+        }
+      }
+    }
+  `,
+  
+  RECENT_POSTS_V3: `
+    query recentPosts($first: Int!) {
+      posts(first: $first, orderBy: createdAt_DESC) {
+        id
+        title
+        text
+        url
+        createdAt
+        user {
+          name
+        }
+      }
+    }
+  `,
+  
+  // Alternative structure based on common GraphQL patterns
+  RECENT_POSTS_V4: `
+    query recentPosts {
+      items {
+        edges {
+          node {
+            id
+            title
+            text
+            url
+            createdAt
+            user {
+              name
+            }
+          }
+        }
+      }
+    }
+  `,
+  
+  // Simple introspection query to understand the schema
+  INTROSPECTION: `
+    query {
+      __schema {
+        queryType {
+          fields {
+            name
+            type {
+              name
+              kind
+            }
+          }
         }
       }
     }
@@ -76,6 +144,7 @@ class StackerNewsBot {
     this.client = new GraphQLClient(CONFIG.STACKER_NEWS_API);
     this.processedPosts = new Set();
     this.isRunning = false;
+    this.workingQuery = null; // Store the working query once found
   }
 
   getPrivateKey() {
@@ -99,6 +168,7 @@ class StackerNewsBot {
       const stateData = await fs.readFile(CONFIG.STATE_FILE, 'utf8');
       const state = JSON.parse(stateData);
       this.processedPosts = new Set(state.processedPosts || []);
+      this.workingQuery = state.workingQuery || null;
       console.log(`Loaded ${this.processedPosts.size} processed posts from state`);
     } catch (error) {
       console.log('No previous state found, starting fresh');
@@ -108,10 +178,59 @@ class StackerNewsBot {
   async saveState() {
     const state = {
       processedPosts: Array.from(this.processedPosts),
+      workingQuery: this.workingQuery,
       lastRun: new Date().toISOString()
     };
     await fs.writeFile(CONFIG.STATE_FILE, JSON.stringify(state, null, 2));
     console.log('State saved');
+  }
+
+  async discoverSchema() {
+    try {
+      console.log('Discovering GraphQL schema...');
+      const response = await this.client.request(QUERIES.INTROSPECTION);
+      const queryFields = response.__schema.queryType.fields;
+      
+      console.log('Available query fields:');
+      queryFields.forEach(field => {
+        console.log(`  - ${field.name}: ${field.type.name || field.type.kind}`);
+      });
+      
+      return queryFields;
+    } catch (error) {
+      console.log('Schema introspection failed:', error.message);
+      return null;
+    }
+  }
+
+  async findWorkingQuery() {
+    if (this.workingQuery) {
+      return this.workingQuery;
+    }
+
+    console.log('Testing different query formats...');
+    
+    // Test queries in order of preference
+    const queryTests = [
+      { name: 'RECENT_POSTS_V1', query: QUERIES.RECENT_POSTS_V1, vars: {} },
+      { name: 'RECENT_POSTS_V2', query: QUERIES.RECENT_POSTS_V2, vars: { first: CONFIG.SCAN_LIMIT } },
+      { name: 'RECENT_POSTS_V3', query: QUERIES.RECENT_POSTS_V3, vars: { first: CONFIG.SCAN_LIMIT } },
+      { name: 'RECENT_POSTS_V4', query: QUERIES.RECENT_POSTS_V4, vars: {} }
+    ];
+
+    for (const test of queryTests) {
+      try {
+        console.log(`Testing ${test.name}...`);
+        const response = await this.client.request(test.query, test.vars);
+        console.log(`✓ ${test.name} works!`);
+        this.workingQuery = test.name;
+        return test.name;
+      } catch (error) {
+        console.log(`✗ ${test.name} failed: ${error.message}`);
+      }
+    }
+
+    throw new Error('No working query found. Schema may have changed significantly.');
   }
 
   extractYouTubeId(text) {
@@ -165,12 +284,58 @@ class StackerNewsBot {
 
   async fetchRecentPosts() {
     try {
-      const response = await this.client.request(QUERIES.RECENT_POSTS, {
-        limit: CONFIG.SCAN_LIMIT
-      });
-      return response.items || [];
+      // Find a working query if we don't have one
+      if (!this.workingQuery) {
+        await this.findWorkingQuery();
+      }
+
+      let query, variables;
+      
+      switch (this.workingQuery) {
+        case 'RECENT_POSTS_V1':
+          query = QUERIES.RECENT_POSTS_V1;
+          variables = {};
+          break;
+        case 'RECENT_POSTS_V2':
+          query = QUERIES.RECENT_POSTS_V2;
+          variables = { first: CONFIG.SCAN_LIMIT };
+          break;
+        case 'RECENT_POSTS_V3':
+          query = QUERIES.RECENT_POSTS_V3;
+          variables = { first: CONFIG.SCAN_LIMIT };
+          break;
+        case 'RECENT_POSTS_V4':
+          query = QUERIES.RECENT_POSTS_V4;
+          variables = {};
+          break;
+        default:
+          throw new Error('No working query available');
+      }
+
+      const response = await this.client.request(query, variables);
+      
+      // Extract items based on response structure
+      let items = [];
+      if (response.items) {
+        if (Array.isArray(response.items)) {
+          items = response.items;
+        } else if (response.items.edges) {
+          items = response.items.edges.map(edge => edge.node);
+        }
+      } else if (response.posts) {
+        items = response.posts;
+      }
+
+      return items;
     } catch (error) {
       console.error('Error fetching posts:', error);
+      
+      // If our working query suddenly fails, reset it
+      if (this.workingQuery) {
+        console.log('Working query failed, will try to discover new one next time');
+        this.workingQuery = null;
+      }
+      
       return [];
     }
   }
@@ -251,6 +416,11 @@ class StackerNewsBot {
       
       // Load previous state
       await this.loadState();
+      
+      // Discover schema if needed
+      if (!this.workingQuery) {
+        await this.discoverSchema();
+      }
       
       // Authenticate with Nostr
       console.log('Authenticating with Nostr...');
