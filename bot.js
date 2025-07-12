@@ -14,7 +14,7 @@ const path = require('path');
 const CONFIG = {
   STACKER_NEWS_API: 'https://stacker.news/api/graphql',
   YEWTU_BE_BASE: 'https://yewtu.be',
-  COMMENT_TEMPLATE: '🔗 Alternative link: {link}\n\n*Privacy-friendly YouTube alternative via Yewtu.be*',
+  COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}',
   SCAN_LIMIT: 50, // Number of recent posts to scan
   RATE_LIMIT_DELAY: 2000, // ms between API calls
   STATE_FILE: './.bot-state.json'
