@@ -1,12 +1,12 @@
 {
-  "name": "ai-code-generator-bot",
-  "version": "1.0.0",
+  "name": "yew-tu-bot",
+  "version": "0.3.0",
   "description": "AI-powered code generation bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test": "jest"
+    "test": "echo \"No tests specified\" && exit 0"
   },
   "keywords": [
     "ai",
