@@ -1,68 +1,27 @@
-name: Stacker.News YouTube Bot
+name: YouTuBot
 
 on:
   schedule:
-    # Run every 10 minutes
-    - cron: '*/10 * * * *'
-  
+    - cron: '*/10 * * * *'  # runs every 10 minutes
   workflow_dispatch:
-    # Allow manual triggering
-    inputs:
-      debug:
-        description: 'Enable debug logging'
-        required: false
-        default: 'false'
-        type: boolean
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 9
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-        cache: 'npm'
-        
-    - name: Install dependencies
-      run: npm ci
-      
-    - name: Restore bot state
-      uses: actions/cache/restore@v4
-      with:
-        path: .bot-state.json
-        key: bot-state-${{ github.run_id }}
-        restore-keys: |
-          bot-state-
-          
-    - name: Run bot
-      env:
-        NOSTR_PRIVATE_KEY: ${{ secrets.NOSTR_PRIVATE_KEY }}
-        NODE_ENV: production
-      run: |
-        if [ "${{ github.event.inputs.debug }}" == "true" ]; then
-          export DEBUG=true
-        fi
-        npm start
-        
-    - name: Save bot state
-      uses: actions/cache/save@v4
-      if: always()
-      with:
-        path: .bot-state.json
-        key: bot-state-${{ github.run_id }}
-        
-    - name: Upload logs
-      uses: actions/upload-artifact@v4
-      if: failure()
-      with:
-        name: bot-logs-${{ github.run_id }}
-        path: |
-          *.log
-          .bot-state.json
-        retention-days: 7
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 18
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run bot
+        env:
+          NOSTR_PRIVKEY: ${{ secrets.NOSTR_PRIVKEY }}
+          STACKER_USERNAME: ${{ secrets.STACKER_USERNAME }}
+        run: npm start
