@@ -5,7 +5,7 @@
  * Monitors for YouTube links and posts yewtu.be alternatives
  */
 
-const { getPublicKey, finalizeEvent, verifyEvent, nip19 } = require('nostr-tools');
+const { getPublicKey, finalizeEvent, verifyEvent, nip19, SimplePool } = require('nostr-tools');
 const { GraphQLClient } = require('graphql-request');
 const fs = require('fs').promises;
 const path = require('path');
@@ -13,11 +13,20 @@ const path = require('path');
 // Configuration
 const CONFIG = {
   STACKER_NEWS_API: 'https://stacker.news/api/graphql',
+  STACKER_NEWS_BASE: 'https://stacker.news',
   YEWTU_BE_BASE: 'https://yewtu.be',
   COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}',
+  NOSTR_NOTE_TEMPLATE: '{title}\n\n{stackerLink}/r/YewTuBot\n\n#YewTuBot\n#Video\n#watch\n#grownostr\n#Videostr\n#INVIDIOUS', // Privacy-friendly YouTube: {yewtuLink}
   SCAN_LIMIT: 50, // Number of recent posts to scan
   RATE_LIMIT_DELAY: 2000, // ms between API calls
-  STATE_FILE: './.bot-state.json'
+  STATE_FILE: './.bot-state.json',
+  NOSTR_RELAYS: [
+    'wss://relay.stacker.news',
+    'wss://relay.damus.io',
+    'wss://nos.lol',
+    'wss://relay.nostr.band',
+    'wss://nostr.wine'
+  ]
 };
 
 // YouTube URL patterns
@@ -194,6 +203,7 @@ class StackerNewsBot {
     this.privateKey = this.getPrivateKey();
     this.publicKey = getPublicKey(this.privateKey);
     this.client = new GraphQLClient(CONFIG.STACKER_NEWS_API);
+    this.nostrPool = new SimplePool();
     this.processedPosts = new Set();
     this.isRunning = false;
     this.workingQuery = null;
@@ -471,7 +481,104 @@ class StackerNewsBot {
     }
   }
 
-  async postComment(postId, text) {
+  async publishNostrNote(title, postId, yewtubeUrl) {
+    try {
+      // Build Stacker.News link
+      const stackerLink = `${CONFIG.STACKER_NEWS_BASE}/items/${postId}`;
+      
+      // Create note content
+      const noteContent = CONFIG.NOSTR_NOTE_TEMPLATE
+        .replace('{title}', title || 'Untitled Post')
+        .replace('{stackerLink}', stackerLink)
+        .replace('{yewtuLink}', yewtubeUrl);
+
+      // Create Nostr event
+      const noteEvent = {
+        kind: 1, // Text note
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['t', 'stackernews'],
+          ['t', 'youtube'],
+          ['t', 'privacy'],
+          ['t', 'yewtubot'],
+          ['r', stackerLink],
+          ['r', yewtubeUrl]
+        ],
+        content: noteContent,
+        pubkey: this.publicKey
+      };
+
+      // Sign the event
+      const signedEvent = finalizeEvent(noteEvent, this.privateKey);
+      
+      console.log(`Publishing Nostr note for post ${postId}...`);
+      console.log(`Note content: ${noteContent}`);
+      
+      // Publish to relays
+      const publishPromises = CONFIG.NOSTR_RELAYS.map(relay => 
+        this.publishToRelay(relay, signedEvent)
+      );
+      
+      const results = await Promise.allSettled(publishPromises);
+      
+      // Count successful publications
+      const successful = results.filter(r => r.status === 'fulfilled').length;
+      const failed = results.filter(r => r.status === 'rejected').length;
+      
+      console.log(`Nostr note published to ${successful}/${CONFIG.NOSTR_RELAYS.length} relays (${failed} failed)`);
+      
+      if (failed > 0) {
+        const failedRelays = results
+          .map((r, i) => r.status === 'rejected' ? CONFIG.NOSTR_RELAYS[i] : null)
+          .filter(Boolean);
+        console.log('Failed relays:', failedRelays);
+      }
+      
+      return { successful, failed, total: CONFIG.NOSTR_RELAYS.length };
+    } catch (error) {
+      console.error('Error publishing Nostr note:', error);
+      throw error;
+    }
+  }
+
+  async publishToRelay(relayUrl, event) {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        reject(new Error(`Timeout publishing to ${relayUrl}`));
+      }, 10000); // 10 second timeout
+
+      try {
+        const relay = this.nostrPool.ensureRelay(relayUrl);
+        
+        relay.on('connect', () => {
+          console.log(`Connected to ${relayUrl}`);
+        });
+        
+        relay.on('error', (error) => {
+          clearTimeout(timeoutId);
+          reject(new Error(`Relay error for ${relayUrl}: ${error.message}`));
+        });
+        
+        // Publish the event
+        const pub = relay.publish(event);
+        
+        pub.on('ok', () => {
+          clearTimeout(timeoutId);
+          console.log(`✓ Successfully published to ${relayUrl}`);
+          resolve(relayUrl);
+        });
+        
+        pub.on('failed', (reason) => {
+          clearTimeout(timeoutId);
+          reject(new Error(`Failed to publish to ${relayUrl}: ${reason}`));
+        });
+        
+      } catch (error) {
+        clearTimeout(timeoutId);
+        reject(new Error(`Error with ${relayUrl}: ${error.message}`));
+      }
+    });
+  }
     try {
       // Try the standard mutation first
       let response;
@@ -535,10 +642,16 @@ class StackerNewsBot {
       console.log(`Found YouTube link in post ${post.id}: ${originalYouTubeUrl}`);
       console.log(`Posting comment with yewtu.be alternative: ${yewtubeUrl}`);
       
+      // Post comment on Stacker.News
       await this.postComment(post.id, commentText);
+      console.log(`Successfully posted comment on post ${post.id}`);
+      
+      // Publish Nostr note
+      await this.publishNostrNote(post.title, post.id, yewtubeUrl);
+      
       this.processedPosts.add(post.id);
       
-      console.log(`Successfully posted comment on post ${post.id}`);
+      console.log(`Successfully processed post ${post.id} (comment + Nostr note)`);
       return true;
     } catch (error) {
       console.error(`Failed to post comment on post ${post.id}:`, error);
@@ -574,12 +687,14 @@ class StackerNewsBot {
       
       let processedCount = 0;
       let commentedCount = 0;
+      let nostrNotesCount = 0;
       
       // Process each post
       for (const post of posts) {
         const result = await this.processPost(post);
         if (result) {
           commentedCount++;
+          nostrNotesCount++;
         }
         processedCount++;
         
@@ -592,7 +707,7 @@ class StackerNewsBot {
       // Save state
       await this.saveState();
       
-      console.log(`Run completed: ${processedCount} posts processed, ${commentedCount} comments posted`);
+      console.log(`Run completed: ${processedCount} posts processed, ${commentedCount} comments posted, ${nostrNotesCount} Nostr notes published`);
       
     } catch (error) {
       console.error('Bot run failed:', error);
@@ -608,6 +723,17 @@ class StackerNewsBot {
 
   async cleanup() {
     console.log('Cleaning up...');
+    
+    // Close Nostr pool connections
+    if (this.nostrPool) {
+      try {
+        this.nostrPool.close(CONFIG.NOSTR_RELAYS);
+        console.log('Closed Nostr relay connections');
+      } catch (error) {
+        console.log('Error closing Nostr connections:', error.message);
+      }
+    }
+    
     await this.saveState();
   }
 }
