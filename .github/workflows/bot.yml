@@ -1,4 +1,4 @@
-name: Stacker.News YouTube Bot
+name: YewTuBot
 
 on:
   schedule:
