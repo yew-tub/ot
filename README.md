@@ -1,7 +1,45 @@
-md
-# Stacker.News YouTube Bot
+                                                                                  
+@@@ @@@  @@@@@@@@  @@@  @@@  @@@  @@@@@@@  @@@  @@@  @@@@@@@    @@@@@@   @@@@@@@  
+@@@ @@@  @@@@@@@@  @@@  @@@  @@@  @@@@@@@  @@@  @@@  @@@@@@@@  @@@@@@@@  @@@@@@@  
+@@! !@@  @@!       @@!  @@!  @@!    @@!    @@!  @@@  @@!  @@@  @@!  @@@    @@!    
+!@! @!!  !@!       !@!  !@!  !@!    !@!    !@!  @!@  !@   @!@  !@!  @!@    !@!    
+ !@!@!   @!!!:!    @!!  !!@  @!@    @!!    @!@  !@!  @!@!@!@   @!@  !@!    @!!    
+  @!!!   !!!!!:    !@!  !!!  !@!    !!!    !@!  !!!  !!!@!!!!  !@!  !!!    !!!    
+  !!:    !!:       !!:  !!:  !!:    !!:    !!:  !!!  !!:  !!!  !!:  !!!    !!:    
+  :!:    :!:       :!:  :!:  :!:    :!:    :!:  !:!  :!:  !:!  :!:  !:!    :!:    
+   ::     :: ::::   :::: :: :::      ::    ::::: ::   :: ::::  ::::: ::     ::    
+   :     : :: ::     :: :  : :       :      : :  :   :: : ::    : :  :      :
 
+
+                            ___    ___   ___                 
+ ____  ____  ____  _  __/ _ \  |_  | <  / ____  ____  ____
+/___/ /___/ /___/ | |/ / // / / __/_ / / /___/ /___/ /___/
+                  |___/\___(_)____(_)_/
+
+                  
 A bot that monitors [Stacker.News](https://stacker.news) for YouTube links and automatically posts comments with privacy-friendly [Yewtu.be](https://yewtu.be) alternatives.
+
+```
+₿ loading... 
+₿ fetching all recent posts every minute
+₿ detect if a post contains or is a YT link
+₿ add comment with one of the available INVIDIOUS instance⁽¹⁾ links
+₿ utilise the SponsorBlock⁽²⁾ browser extension to automatically skip sponsor segments in YT videos
+₿ it is recommended to operate a VPN while browsing
+₿ examine the log⁽³⁾ for recently parsed YT links
+₿ zap⁽⁴⁾ YewTuBot comments to activate the bot and ensure a persistent service
+₿ waiting for zaps...
+₿ █
+
+
+```
+- - -
+
+<sub>1.</sub> [<sub>docs.invidious.io/instances</sub>](https://docs.invidious.io/instances/)
+<sub>2.</sub> [<sub>www.sponsor.ajay.app</sub>](https://sponsor.ajay.app)
+<sub>3.</sub> [<sub>www.stacker.news/YewTuBot/all</sub>](https://stacker.news/YewTuBot/all/r/YewTuBot)
+<sub>4.</sub> [<sub>zap.tryspeed.com/plink_live_mbp695vnMFTI2YHq</sub>](https://buy.tryspeed.com/plink_live_mbp695vnMFTI2YHq)
+
 
 ## Key Features & Benefits
 
