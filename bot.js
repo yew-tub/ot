@@ -579,6 +579,8 @@ class StackerNewsBot {
       }
     });
   }
+
+  async postComment(postId, text) {
     try {
       // Try the standard mutation first
       let response;
