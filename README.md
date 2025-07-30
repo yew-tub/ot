@@ -1,4 +1,4 @@
-```                                                                                  
+```bash                                                                                  
 @@@ @@@  @@@@@@@@  @@@  @@@  @@@  @@@@@@@  @@@  @@@  @@@@@@@    @@@@@@   @@@@@@@  
 @@@ @@@  @@@@@@@@  @@@  @@@  @@@  @@@@@@@  @@@  @@@  @@@@@@@@  @@@@@@@@  @@@@@@@  
 @@! !@@  @@!       @@!  @@!  @@!    @@!    @@!  @@@  @@!  @@@  @@!  @@@    @@!    
@@ -20,7 +20,7 @@
                   
 A bot that monitors [Stacker.News](https://stacker.news) for YouTube links and automatically posts comments with privacy-friendly [Yewtu.be](https://yewtu.be) alternatives.
 
-```
+```bash
 ₿ loading... 
 ₿ fetching all recent posts every minute
 ₿ detect if a post contains or is a YT link
@@ -85,7 +85,7 @@ Before you begin, ensure you have the following installed:
 
     Example `.env` file:
 
-    ```
+    ```bash
     NOSTR_PRIVATE_KEY=nsec1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
     STACKER_NEWS_API=https://stacker.news/api/graphql
     STACKER_NEWS_BASE=https://stacker.news
