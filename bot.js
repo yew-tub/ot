@@ -29,75 +29,75 @@ const YOUTUBE_PATTERNS = [
   /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi
 ];
 
-// GraphQL queries - Updated to match current schema
+// GraphQL queries - Fixed to match current Stacker.News schema
 const QUERIES = {
-  // Try different possible query structures
+  // Based on error analysis, the correct structure appears to be:
   RECENT_POSTS_V1: `
-    query {
-      items {
-        id
-        title
-        text
-        url
-        createdAt
-        user {
-          name
+    query recentItems($sort: String, $when: String, $limit: Int) {
+      items(sort: $sort, when: $when, limit: $limit) {
+        items {
+          id
+          title
+          text
+          url
+          createdAt
+          user {
+            name
+          }
+          ncomments
+          sats
         }
+        cursor
       }
     }
   `,
   
+  // Fallback with minimal parameters
   RECENT_POSTS_V2: `
-    query recentPosts($first: Int!) {
-      items(first: $first, orderBy: createdAt_DESC) {
-        id
-        title
-        text
-        url
-        createdAt
-        user {
-          name
-        }
-      }
-    }
-  `,
-  
-  RECENT_POSTS_V3: `
-    query recentPosts($first: Int!) {
-      posts(first: $first, orderBy: createdAt_DESC) {
-        id
-        title
-        text
-        url
-        createdAt
-        user {
-          name
-        }
-      }
-    }
-  `,
-  
-  // Alternative structure based on common GraphQL patterns
-  RECENT_POSTS_V4: `
-    query recentPosts {
-      items {
-        edges {
-          node {
-            id
-            title
-            text
-            url
-            createdAt
-            user {
-              name
-            }
+    query recentItems($sort: String, $limit: Int) {
+      items(sort: $sort, limit: $limit) {
+        items {
+          id
+          title
+          text
+          url
+          createdAt
+          user {
+            name
           }
         }
       }
     }
   `,
   
-  // Simple introspection query to understand the schema
+  // Even simpler fallback
+  RECENT_POSTS_V3: `
+    query recentItems {
+      items {
+        items {
+          id
+          title
+          text
+          url
+          createdAt
+          user {
+            name
+          }
+        }
+      }
+    }
+  `,
+  
+  // Minimal test query
+  RECENT_POSTS_V4: `
+    query {
+      items {
+        cursor
+      }
+    }
+  `,
+  
+  // Schema introspection for debugging
   INTROSPECTION: `
     query {
       __schema {
@@ -108,15 +108,23 @@ const QUERIES = {
               name
               kind
             }
+            args {
+              name
+              type {
+                name
+                kind
+              }
+            }
           }
         }
       }
     }
   `,
   
+  // Comment mutation - this might also need adjustment
   POST_COMMENT: `
-    mutation createComment($id: ID!, $text: String!) {
-      createComment(id: $id, text: $text) {
+    mutation createComment($parentId: ID!, $text: String!) {
+      createComment(parentId: $parentId, text: $text) {
         id
       }
     }
@@ -144,7 +152,7 @@ class StackerNewsBot {
     this.client = new GraphQLClient(CONFIG.STACKER_NEWS_API);
     this.processedPosts = new Set();
     this.isRunning = false;
-    this.workingQuery = null; // Store the working query once found
+    this.workingQuery = null; // Store the working query configuration
   }
 
   getPrivateKey() {
@@ -193,13 +201,37 @@ class StackerNewsBot {
       
       console.log('Available query fields:');
       queryFields.forEach(field => {
-        console.log(`  - ${field.name}: ${field.type.name || field.type.kind}`);
+        const args = field.args.map(arg => `${arg.name}: ${arg.type.name || arg.type.kind}`).join(', ');
+        console.log(`  - ${field.name}(${args}): ${field.type.name || field.type.kind}`);
       });
       
       return queryFields;
     } catch (error) {
       console.log('Schema introspection failed:', error.message);
       return null;
+    }
+  }
+
+  async makeGraphQLRequest(query, variables = {}) {
+    try {
+      const response = await this.client.request(query, variables);
+      return response;
+    } catch (error) {
+      console.log(`GraphQL request failed: ${error.message}`);
+      if (error.response) {
+        console.log('Response details:', JSON.stringify({
+          response: {
+            errors: error.response.errors,
+            status: error.response.status,
+            headers: error.response.headers
+          },
+          request: {
+            query,
+            variables
+          }
+        }));
+      }
+      throw error;
     }
   }
 
@@ -212,19 +244,45 @@ class StackerNewsBot {
     
     // Test queries in order of preference
     const queryTests = [
-      { name: 'RECENT_POSTS_V1', query: QUERIES.RECENT_POSTS_V1, vars: {} },
-      { name: 'RECENT_POSTS_V2', query: QUERIES.RECENT_POSTS_V2, vars: { first: CONFIG.SCAN_LIMIT } },
-      { name: 'RECENT_POSTS_V3', query: QUERIES.RECENT_POSTS_V3, vars: { first: CONFIG.SCAN_LIMIT } },
-      { name: 'RECENT_POSTS_V4', query: QUERIES.RECENT_POSTS_V4, vars: {} }
+      { 
+        name: 'RECENT_POSTS_V1', 
+        query: QUERIES.RECENT_POSTS_V1, 
+        vars: { sort: 'recent', when: 'day', limit: CONFIG.SCAN_LIMIT } 
+      },
+      { 
+        name: 'RECENT_POSTS_V2', 
+        query: QUERIES.RECENT_POSTS_V2, 
+        vars: { sort: 'recent', limit: CONFIG.SCAN_LIMIT } 
+      },
+      { 
+        name: 'RECENT_POSTS_V3', 
+        query: QUERIES.RECENT_POSTS_V3, 
+        vars: {} 
+      },
+      { 
+        name: 'RECENT_POSTS_V4', 
+        query: QUERIES.RECENT_POSTS_V4, 
+        vars: {} 
+      }
     ];
 
     for (const test of queryTests) {
       try {
         console.log(`Testing ${test.name}...`);
-        const response = await this.client.request(test.query, test.vars);
-        console.log(`✓ ${test.name} works!`);
-        this.workingQuery = test.name;
-        return test.name;
+        const response = await this.makeGraphQLRequest(test.query, test.vars);
+        
+        // Check if we got a valid response structure
+        if (response && (response.items || response.posts)) {
+          console.log(`✓ ${test.name} succeeded`);
+          this.workingQuery = {
+            name: test.name,
+            query: test.query,
+            variables: test.vars
+          };
+          return this.workingQuery;
+        } else {
+          console.log(`✗ ${test.name} returned unexpected structure`);
+        }
       } catch (error) {
         console.log(`✗ ${test.name} failed: ${error.message}`);
       }
@@ -248,18 +306,23 @@ class StackerNewsBot {
 
   convertToYewTube(originalUrl, videoId) {
     // Preserve query parameters if present
-    const url = new URL(originalUrl);
-    const searchParams = new URLSearchParams(url.search);
-    
-    // Build yewtu.be URL
-    let yewtubeUrl = `${CONFIG.YEWTU_BE_BASE}/watch?v=${videoId}`;
-    
-    // Add timestamp if present
-    if (searchParams.has('t')) {
-      yewtubeUrl += `&t=${searchParams.get('t')}`;
+    try {
+      const url = new URL(originalUrl);
+      const searchParams = new URLSearchParams(url.search);
+      
+      // Build yewtu.be URL
+      let yewtubeUrl = `${CONFIG.YEWTU_BE_BASE}/watch?v=${videoId}`;
+      
+      // Add timestamp if present
+      if (searchParams.has('t')) {
+        yewtubeUrl += `&t=${searchParams.get('t')}`;
+      }
+      
+      return yewtubeUrl;
+    } catch (error) {
+      // Fallback for malformed URLs
+      return `${CONFIG.YEWTU_BE_BASE}/watch?v=${videoId}`;
     }
-    
-    return yewtubeUrl;
   }
 
   async authenticateWithNostr() {
@@ -289,44 +352,32 @@ class StackerNewsBot {
         await this.findWorkingQuery();
       }
 
-      let query, variables;
-      
-      switch (this.workingQuery) {
-        case 'RECENT_POSTS_V1':
-          query = QUERIES.RECENT_POSTS_V1;
-          variables = {};
-          break;
-        case 'RECENT_POSTS_V2':
-          query = QUERIES.RECENT_POSTS_V2;
-          variables = { first: CONFIG.SCAN_LIMIT };
-          break;
-        case 'RECENT_POSTS_V3':
-          query = QUERIES.RECENT_POSTS_V3;
-          variables = { first: CONFIG.SCAN_LIMIT };
-          break;
-        case 'RECENT_POSTS_V4':
-          query = QUERIES.RECENT_POSTS_V4;
-          variables = {};
-          break;
-        default:
-          throw new Error('No working query available');
-      }
-
-      const response = await this.client.request(query, variables);
+      const response = await this.makeGraphQLRequest(
+        this.workingQuery.query, 
+        this.workingQuery.variables
+      );
       
       // Extract items based on response structure
       let items = [];
+      
       if (response.items) {
-        if (Array.isArray(response.items)) {
+        // Handle nested items structure
+        if (response.items.items && Array.isArray(response.items.items)) {
+          items = response.items.items;
+        }
+        // Handle direct array
+        else if (Array.isArray(response.items)) {
           items = response.items;
-        } else if (response.items.edges) {
+        }
+        // Handle edges structure (GraphQL Relay pattern)
+        else if (response.items.edges) {
           items = response.items.edges.map(edge => edge.node);
         }
       } else if (response.posts) {
-        items = response.posts;
+        items = Array.isArray(response.posts) ? response.posts : [];
       }
 
-      return items;
+      return items.filter(item => item && item.id); // Filter out null/undefined items
     } catch (error) {
       console.error('Error fetching posts:', error);
       
@@ -342,10 +393,21 @@ class StackerNewsBot {
 
   async postComment(postId, text) {
     try {
-      const response = await this.client.request(QUERIES.POST_COMMENT, {
-        id: postId,
-        text: text
-      });
+      // Try the standard mutation first
+      let response;
+      try {
+        response = await this.client.request(QUERIES.POST_COMMENT, {
+          parentId: postId,
+          text: text
+        });
+      } catch (error) {
+        // Try alternative parameter name
+        response = await this.client.request(QUERIES.POST_COMMENT.replace('parentId', 'id'), {
+          id: postId,
+          text: text
+        });
+      }
+      
       return response.createComment;
     } catch (error) {
       console.error('Error posting comment:', error);
@@ -373,6 +435,10 @@ class StackerNewsBot {
       const match = pattern.exec(content);
       if (match) {
         originalYouTubeUrl = match[0];
+        // Ensure URL has protocol
+        if (!originalYouTubeUrl.startsWith('http')) {
+          originalYouTubeUrl = 'https://' + originalYouTubeUrl;
+        }
         break;
       }
     }
