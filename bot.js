@@ -16,7 +16,7 @@ const CONFIG = {
   STACKER_NEWS_BASE: 'https://stacker.news',
   YEWTU_BE_BASE: 'https://yewtu.be',
   COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}',
-  NOSTR_NOTE_TEMPLATE: '{title}\n\n{stackerLink}/r/YewTuBot\n\n#YewTuBot\n#Video\n#watch\n#grownostr\n#Videostr\n#INVIDIOUS', // Privacy-friendly YouTube: {yewtuLink}
+  NOSTR_NOTE_TEMPLATE: '{title}\n\n{stackerLink}/r/YewTuBot\n\n#YewTuBot #Video #watch #grownostr #Videostr #INVIDIOUS', // Privacy-friendly YouTube: {yewtuLink}
   SCAN_LIMIT: 50, // Number of recent posts to scan
   RATE_LIMIT_DELAY: 2000, // ms between API calls
   STATE_FILE: './.bot-state.json',
