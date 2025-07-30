@@ -2,8 +2,8 @@ name: YewTuBot
 
 on:
   schedule:
-    # Run every 10 minutes
-    - cron: '*/10 * * * *'
+    # Run every 7 minutes
+    - cron: '*/7 * * * *'
   
   workflow_dispatch:
     # Allow manual triggering
