@@ -29,86 +29,48 @@ const YOUTUBE_PATTERNS = [
   /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi
 ];
 
-// GraphQL queries - Fixed to match current Stacker.News schema
+// GraphQL queries - Need to discover the actual structure
 const QUERIES = {
-  // Based on error analysis, the correct structure appears to be:
-  RECENT_POSTS_V1: `
-    query recentItems($sort: String, $when: String, $limit: Int) {
-      items(sort: $sort, when: $when, limit: $limit) {
-        items {
-          id
-          title
-          text
-          url
-          createdAt
-          user {
-            name
-          }
-          ncomments
-          sats
-        }
-        cursor
-      }
-    }
-  `,
-  
-  // Fallback with minimal parameters
-  RECENT_POSTS_V2: `
-    query recentItems($sort: String, $limit: Int) {
-      items(sort: $sort, limit: $limit) {
-        items {
-          id
-          title
-          text
-          url
-          createdAt
-          user {
-            name
-          }
-        }
-      }
-    }
-  `,
-  
-  // Even simpler fallback
-  RECENT_POSTS_V3: `
-    query recentItems {
-      items {
-        items {
-          id
-          title
-          text
-          url
-          createdAt
-          user {
-            name
-          }
-        }
-      }
-    }
-  `,
-  
-  // Minimal test query
-  RECENT_POSTS_V4: `
-    query {
-      items {
-        cursor
-      }
-    }
-  `,
-  
-  // Schema introspection for debugging
-  INTROSPECTION: `
+  // Deep introspection to understand Items and Item types
+  DEEP_INTROSPECTION: `
     query {
       __schema {
-        queryType {
+        types {
+          name
+          kind
           fields {
             name
             type {
               name
               kind
+              ofType {
+                name
+                kind
+              }
             }
-            args {
+          }
+        }
+      }
+    }
+  `,
+  
+  // Test what arguments items field accepts
+  ITEMS_INTROSPECTION: `
+    query {
+      __type(name: "Query") {
+        fields {
+          name
+          args {
+            name
+            type {
+              name
+              kind
+            }
+          }
+          type {
+            name
+            kind
+            fields {
               name
               type {
                 name
@@ -121,7 +83,25 @@ const QUERIES = {
     }
   `,
   
-  // Comment mutation - this might also need adjustment
+  // Basic query to test items field structure
+  TEST_ITEMS_BASIC: `
+    query {
+      items {
+        __typename
+      }
+    }
+  `,
+  
+  // Test with suggested arguments
+  TEST_ITEMS_WITH_ARGS: `
+    query testItems($sort: String, $limit: Int, $from: String) {
+      items(sort: $sort, limit: $limit, from: $from) {
+        __typename
+      }
+    }
+  `,
+  
+  // Comment mutation - might need adjustment
   POST_COMMENT: `
     mutation createComment($parentId: ID!, $text: String!) {
       createComment(parentId: $parentId, text: $text) {
@@ -152,7 +132,8 @@ class StackerNewsBot {
     this.client = new GraphQLClient(CONFIG.STACKER_NEWS_API);
     this.processedPosts = new Set();
     this.isRunning = false;
-    this.workingQuery = null; // Store the working query configuration
+    this.workingQuery = null;
+    this.schemaInfo = null;
   }
 
   getPrivateKey() {
@@ -177,6 +158,7 @@ class StackerNewsBot {
       const state = JSON.parse(stateData);
       this.processedPosts = new Set(state.processedPosts || []);
       this.workingQuery = state.workingQuery || null;
+      this.schemaInfo = state.schemaInfo || null;
       console.log(`Loaded ${this.processedPosts.size} processed posts from state`);
     } catch (error) {
       console.log('No previous state found, starting fresh');
@@ -187,29 +169,11 @@ class StackerNewsBot {
     const state = {
       processedPosts: Array.from(this.processedPosts),
       workingQuery: this.workingQuery,
+      schemaInfo: this.schemaInfo,
       lastRun: new Date().toISOString()
     };
     await fs.writeFile(CONFIG.STATE_FILE, JSON.stringify(state, null, 2));
     console.log('State saved');
-  }
-
-  async discoverSchema() {
-    try {
-      console.log('Discovering GraphQL schema...');
-      const response = await this.client.request(QUERIES.INTROSPECTION);
-      const queryFields = response.__schema.queryType.fields;
-      
-      console.log('Available query fields:');
-      queryFields.forEach(field => {
-        const args = field.args.map(arg => `${arg.name}: ${arg.type.name || arg.type.kind}`).join(', ');
-        console.log(`  - ${field.name}(${args}): ${field.type.name || field.type.kind}`);
-      });
-      
-      return queryFields;
-    } catch (error) {
-      console.log('Schema introspection failed:', error.message);
-      return null;
-    }
   }
 
   async makeGraphQLRequest(query, variables = {}) {
@@ -226,11 +190,144 @@ class StackerNewsBot {
             headers: error.response.headers
           },
           request: {
-            query,
+            query: query.slice(0, 200) + '...',
             variables
           }
         }));
       }
+      throw error;
+    }
+  }
+
+  async discoverDetailedSchema() {
+    if (this.schemaInfo) {
+      return this.schemaInfo;
+    }
+
+    try {
+      console.log('Performing deep schema introspection...');
+      const response = await this.makeGraphQLRequest(QUERIES.DEEP_INTROSPECTION);
+      
+      // Find Items and Item types
+      const itemsType = response.__schema.types.find(t => t.name === 'Items');
+      const itemType = response.__schema.types.find(t => t.name === 'Item');
+      
+      console.log('\n=== Items Type Structure ===');
+      if (itemsType && itemsType.fields) {
+        itemsType.fields.forEach(field => {
+          console.log(`  - ${field.name}: ${field.type.name || field.type.kind}`);
+        });
+      } else {
+        console.log('  Items type not found or has no fields');
+      }
+      
+      console.log('\n=== Item Type Structure ===');
+      if (itemType && itemType.fields) {
+        itemType.fields.forEach(field => {
+          console.log(`  - ${field.name}: ${field.type.name || field.type.kind}`);
+        });
+      } else {
+        console.log('  Item type not found or has no fields');
+      }
+      
+      // Store schema info
+      this.schemaInfo = {
+        itemsType: itemsType,
+        itemType: itemType,
+        discoveredAt: new Date().toISOString()
+      };
+      
+      return this.schemaInfo;
+    } catch (error) {
+      console.log('Deep schema introspection failed:', error.message);
+      return null;
+    }
+  }
+
+  async buildWorkingQuery() {
+    console.log('\nBuilding working query based on schema...');
+    
+    // Get schema info
+    const schema = await this.discoverDetailedSchema();
+    if (!schema) {
+      throw new Error('Could not discover schema structure');
+    }
+    
+    // Test basic items query first
+    try {
+      console.log('Testing basic items query...');
+      const response = await this.makeGraphQLRequest(QUERIES.TEST_ITEMS_BASIC);
+      console.log('Basic items response:', JSON.stringify(response, null, 2));
+      
+      // Now test with arguments
+      console.log('Testing items query with arguments...');
+      const argsResponse = await this.makeGraphQLRequest(QUERIES.TEST_ITEMS_WITH_ARGS, {
+        sort: 'recent',
+        limit: 10
+      });
+      console.log('Items with args response:', JSON.stringify(argsResponse, null, 2));
+      
+      // Build query based on discovered structure
+      let queryFields = [];
+      
+      // Check what fields are available on Items type
+      if (schema.itemsType && schema.itemsType.fields) {
+        for (const field of schema.itemsType.fields) {
+          if (field.name !== '__typename') {
+            queryFields.push(field.name);
+          }
+        }
+      }
+      
+      // If Items has an items field that returns Item array, use that
+      const itemsField = schema.itemsType?.fields?.find(f => f.name === 'items');
+      if (itemsField) {
+        console.log('Found items field on Items type');
+        
+        // Build nested query for Item fields
+        let itemFields = [];
+        if (schema.itemType && schema.itemType.fields) {
+          for (const field of schema.itemType.fields) {
+            if (['id', 'title', 'text', 'url', 'createdAt'].includes(field.name)) {
+              itemFields.push(field.name);
+            }
+            if (field.name === 'user') {
+              itemFields.push('user { name }');
+            }
+          }
+        }
+        
+        const workingQuery = `
+          query getRecentItems($sort: String, $limit: Int, $from: String) {
+            items(sort: $sort, limit: $limit, from: $from) {
+              items {
+                ${itemFields.join('\n                ')}
+              }
+              ${queryFields.filter(f => f !== 'items').join('\n              ')}
+            }
+          }
+        `;
+        
+        console.log('Built working query:', workingQuery);
+        
+        // Test the query
+        const testResponse = await this.makeGraphQLRequest(workingQuery, {
+          sort: 'recent',
+          limit: 5
+        });
+        
+        console.log('✓ Working query successful!');
+        this.workingQuery = {
+          name: 'DYNAMIC_ITEMS_QUERY',
+          query: workingQuery,
+          variables: { sort: 'recent', limit: CONFIG.SCAN_LIMIT }
+        };
+        
+        return this.workingQuery;
+      }
+      
+    } catch (error) {
+      console.log('Query building failed:', error.message);
       throw error;
     }
   }
@@ -240,55 +337,41 @@ class StackerNewsBot {
       return this.workingQuery;
     }
 
-    console.log('Testing different query formats...');
-    
-    // Test queries in order of preference
-    const queryTests = [
-      { 
-        name: 'RECENT_POSTS_V1', 
-        query: QUERIES.RECENT_POSTS_V1, 
-        vars: { sort: 'recent', when: 'day', limit: CONFIG.SCAN_LIMIT } 
-      },
-      { 
-        name: 'RECENT_POSTS_V2', 
-        query: QUERIES.RECENT_POSTS_V2, 
-        vars: { sort: 'recent', limit: CONFIG.SCAN_LIMIT } 
-      },
-      { 
-        name: 'RECENT_POSTS_V3', 
-        query: QUERIES.RECENT_POSTS_V3, 
-        vars: {} 
-      },
-      { 
-        name: 'RECENT_POSTS_V4', 
-        query: QUERIES.RECENT_POSTS_V4, 
-        vars: {} 
-      }
-    ];
-
-    for (const test of queryTests) {
-      try {
-        console.log(`Testing ${test.name}...`);
-        const response = await this.makeGraphQLRequest(test.query, test.vars);
-        
-        // Check if we got a valid response structure
-        if (response && (response.items || response.posts)) {
-          console.log(`✓ ${test.name} succeeded`);
-          this.workingQuery = {
-            name: test.name,
-            query: test.query,
-            variables: test.vars
-          };
-          return this.workingQuery;
-        } else {
-          console.log(`✗ ${test.name} returned unexpected structure`);
+    try {
+      return await this.buildWorkingQuery();
+    } catch (error) {
+      console.log('Dynamic query building failed, trying manual discovery...');
+      
+      // Fallback: try to use schema discovery output to build simple queries
+      const simpleTests = [
+        {
+          name: 'ITEMS_ONLY',
+          query: 'query { items { __typename } }',
+          variables: {}
+        },
+        {
+          name: 'ITEMS_WITH_CURSOR',
+          query: 'query { items { cursor } }',
+          variables: {}
         }
-      } catch (error) {
-        console.log(`✗ ${test.name} failed: ${error.message}`);
+      ];
+      
+      for (const test of simpleTests) {
+        try {
+          console.log(`Testing ${test.name}...`);
+          const response = await this.makeGraphQLRequest(test.query, test.variables);
+          console.log(`✓ ${test.name} works:`, JSON.stringify(response, null, 2));
+          
+          // This gives us basic structure, but we need to figure out how to get actual items
+          console.log('Basic query works, but need to find actual item data...');
+          
+        } catch (error) {
+          console.log(`✗ ${test.name} failed:`, error.message);
+        }
       }
+      
+      throw new Error('Could not find any working query structure');
     }
-
-    throw new Error('No working query found. Schema may have changed significantly.');
   }
 
   extractYouTubeId(text) {
@@ -357,6 +440,8 @@ class StackerNewsBot {
         this.workingQuery.variables
       );
       
+      console.log('Raw API response:', JSON.stringify(response, null, 2));
+      
       // Extract items based on response structure
       let items = [];
       
@@ -373,10 +458,9 @@ class StackerNewsBot {
         else if (response.items.edges) {
           items = response.items.edges.map(edge => edge.node);
         }
-      } else if (response.posts) {
-        items = Array.isArray(response.posts) ? response.posts : [];
       }
 
+      console.log(`Extracted ${items.length} items from response`);
       return items.filter(item => item && item.id); // Filter out null/undefined items
     } catch (error) {
       console.error('Error fetching posts:', error);
@@ -483,10 +567,9 @@ class StackerNewsBot {
       // Load previous state
       await this.loadState();
       
-      // Discover schema if needed
-      if (!this.workingQuery) {
-        await this.discoverSchema();
-      }
+      // Discover schema and build working query
+      console.log('Discovering GraphQL schema...');
+      await this.discoverDetailedSchema();
       
       // Authenticate with Nostr
       console.log('Authenticating with Nostr...');
