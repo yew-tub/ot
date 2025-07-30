@@ -13,7 +13,7 @@ const path = require('path');
 // Configuration
 const CONFIG = {
   STACKER_NEWS_API: 'https://stacker.news/api/graphql',
-  STACKER_NEWS_BASE: 'https://stacker.news',
+  STACKER_NEWS_BASE: 'https://stacker.news/recent',
   YEWTU_BE_BASE: 'https://yewtu.be',
   COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}',
   NOSTR_NOTE_TEMPLATE: '{title}\n\n{stackerLink}/r/YewTuBot\n\n#YewTuBot #Video #watch #grownostr #Videostr #INVIDIOUS', // Privacy-friendly YouTube: {yewtuLink}
