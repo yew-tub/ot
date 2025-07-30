@@ -1,194 +1,134 @@
+md
 # Stacker.News YouTube Bot
 
 A bot that monitors [Stacker.News](https://stacker.news) for YouTube links and automatically posts comments with privacy-friendly [Yewtu.be](https://yewtu.be) alternatives.
 
-## Features
+## Key Features & Benefits
 
-- 🔍 **Smart Detection**: Monitors new posts for YouTube links in various formats
-- 🔄 **Automatic Conversion**: Converts YouTube URLs to Yewtu.be alternatives
-- 🔐 **Nostr Authentication**: Uses Nostr protocol for secure authentication
-- 💬 **Helpful Comments**: Posts informative comments with alternative links
-- ⚡ **GitHub Actions**: Runs automatically every 10 minutes
-- 🚀 **Easy Setup**: Simple configuration and deployment
-- 📁 **State Management**: Remembers processed posts to avoid duplicates
-- 🛡️ **Rate Limiting**: Built-in delays to respect API limits
+-   🔍 **Smart Detection**: Monitors new posts for YouTube links in various formats (e.g., `youtube.com`, `youtu.be`).
+-   🔄 **Automatic Conversion**: Converts YouTube URLs to Yewtu.be alternatives, providing a more privacy-respecting experience.
+-   🔐 **Nostr Authentication**: Uses the Nostr protocol for secure authentication and posting comments to Stacker.News.
+-   💬 **Helpful Comments**: Posts informative comments containing the Yewtu.be link, encouraging users to switch to a privacy-focused alternative.
+-   ⚙️ **Configurable**:  Easily configurable through environment variables and code modifications.
 
-## How It Works
+## Prerequisites & Dependencies
 
-1. **Monitoring**: Scans recent posts on Stacker.News
-2. **Detection**: Identifies YouTube links using regex patterns
-3. **Conversion**: Converts YouTube URLs to Yewtu.be equivalents
-4. **Authentication**: Uses Nostr keys to authenticate with Stacker.News
-5. **Commenting**: Posts helpful comments with privacy-friendly alternatives
-6. **State Tracking**: Saves processed posts to avoid duplicate comments
+Before you begin, ensure you have the following installed:
 
-## Supported YouTube Formats
+-   **Node.js**:  (Version 16 or higher recommended)  [https://nodejs.org/](https://nodejs.org/)
+-   **npm** (Node Package Manager): Usually comes with Node.js
+-   **Git**:  (Optional, for cloning the repository) [https://git-scm.com/](https://git-scm.com/)
 
-The bot detects these YouTube URL formats:
-- `https://www.youtube.com/watch?v=VIDEO_ID`
-- `https://youtu.be/VIDEO_ID`
-- `https://youtube.com/embed/VIDEO_ID`
-- `https://youtube.com/v/VIDEO_ID`
-- `https://youtube.com/shorts/VIDEO_ID`
+## Installation & Setup Instructions
 
-## Setup Instructions
+1.  **Clone the Repository (Optional):**
 
-### 1. Generate Nostr Keys
+    ```bash
+    git clone https://github.com/yew-tub/ot.git
+    cd ot
+    ```
 
-You'll need a Nostr key pair for authentication. Choose one option:
+2.  **Install Dependencies:**
 
-**Option A: Generate new keys**
-```bash
-npm install
-npm run generate-keys
-```
+    ```bash
+    npm install
+    ```
 
-**Option B: Use existing keys**
-If you already have Nostr keys, you can use your existing private key.
+3.  **Configure Environment Variables:**
 
-### 2. Setup Stacker.News Account
+    You'll need to set up environment variables to configure the bot.  Create a `.env` file (or set them directly in your environment). The following variables are crucial:
 
-1. Go to [Stacker.News](https://stacker.news)
-2. Sign up/sign in using your Nostr public key
-3. Add some sats to your account (required for posting comments)
+    -   `NOSTR_PRIVATE_KEY`: Your Nostr private key (hex or nsec format).  **Keep this secure!**
+    -   `STACKER_NEWS_API`:  The URL for the Stacker.News GraphQL API (default: `https://stacker.news/api/graphql`).
+    -   `STACKER_NEWS_BASE`: The base URL for Stacker.News (default: `https://stacker.news`).
+    -   `YEWTU_BE_BASE`: The base URL for Yewtu.be (default: `https://yewtu.be`).
+    -   `RELAY_URLS`: A comma-separated list of Nostr relay URLs to connect to. Example: `wss://relay.damus.io,wss://relay.snort.social`. If empty, will use the relays provided by SN api.
 
-### 3. Configure GitHub Repository
+    Example `.env` file:
 
-1. Fork this repository
-2. Go to your repository's **Settings** → **Secrets and variables** → **Actions**
-3. Add a new repository secret:
-   - **Name**: `NOSTR_PRIVATE_KEY`
-   - **Value**: Your Nostr private key (hex format)
+    ```
+    NOSTR_PRIVATE_KEY=nsec1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    STACKER_NEWS_API=https://stacker.news/api/graphql
+    STACKER_NEWS_BASE=https://stacker.news
+    YEWTU_BE_BASE=https://yewtu.be
+    RELAY_URLS=wss://relay.damus.io,wss://relay.snort.social
+    ```
 
-### 4. Deploy
+4.  **Generate Nostr Keys (if needed):**
 
-The bot will automatically start running when you push to the main branch. It's configured to:
-- Run every 10 minutes via cron schedule
-- Can be triggered manually from the Actions tab
-- Automatically handles state persistence
+    The `package.json` includes a script to generate Nostr keys:
 
-## Local Development
+    ```bash
+    npm run generate-keys
+    ```
 
-### Installation
+    **Important**: Store your private key securely. This command is only intended for testing purposes.
 
-```bash
-git clone https://github.com/yew-tub/ot.git
-cd ot
-npm install
-```
+5.  **Run the Bot:**
 
-### Configuration
+    ```bash
+    npm start
+    ```
 
-Create a `.env` file (optional for local development):
-```bash
-NOSTR_PRIVATE_KEY=your_private_key_here
-```
+    Alternatively, for development with automatic restarts on code changes:
 
-### Running
+    ```bash
+    npm run dev
+    ```
 
-```bash
-# Run once
-npm start
+## Usage Examples & Code Snippets
 
-# Run with auto-restart during development
-npm run dev
+The core logic resides in `bot.js`.  It periodically queries the Stacker.News API, parses posts for YouTube links, constructs Yewtu.be links, and posts comments using the Nostr protocol.
 
-# Generate new Nostr keys
-npm run generate-keys
+Example:
+
+```javascript
+// Inside bot.js
+
+const { getPublicKey, finalizeEvent, verifyEvent, nip19, SimplePool } = require('nostr-tools');
+const { GraphQLClient } = require('graphql-request');
+
+// ... other code ...
+
+async function processPost(post) {
+  const youtubeLink = findYouTubeLink(post.text);
+  if (youtubeLink) {
+    const yewtubeLink = convertToYewtube(youtubeLink);
+    const commentText = `I found a YouTube link in this post!  Check out the privacy-friendly Yewtu.be alternative: ${yewtubeLink}`;
+    await postComment(post.id, commentText);
+  }
+}
 ```
 
 ## Configuration Options
 
-You can modify the bot behavior by editing `bot.js`:
+The bot's behavior can be configured through environment variables and by modifying the `bot.js` file.
 
-```javascript
-const CONFIG = {
-  STACKER_NEWS_API: 'https://stacker.news/api/graphql',
-  YEWTU_BE_BASE: 'https://yewtu.be',
-  COMMENT_TEMPLATE: '🔗 Alternative link: {link}\n\n*Privacy-friendly YouTube alternative via Yewtu.be*',
-  SCAN_LIMIT: 50, // Number of recent posts to scan
-  RATE_LIMIT_DELAY: 2000, // ms between API calls
-  STATE_FILE: './.bot-state.json'
-};
-```
+-   **Environment Variables:**  As described in the "Installation & Setup Instructions" section.
 
-## Example Bot Comment
+-   **Code Modifications:** You can adjust the polling interval, customize the comment text, or modify the logic for detecting YouTube links.  See the `bot.js` file for details.
 
-When the bot detects a YouTube link, it posts a comment like:
+## Contributing Guidelines
 
-```
-🔗 Alternative link: https://yewtu.be/watch?v=dQw4w9WgXcQ
+We welcome contributions to improve this bot!  Here's how you can contribute:
 
-*Privacy-friendly YouTube alternative via Yewtu.be*
-```
+1.  Fork the repository.
+2.  Create a new branch for your feature or bug fix.
+3.  Make your changes and commit them with clear, descriptive commit messages.
+4.  Submit a pull request to the `main` branch.
 
-## GitHub Actions Details
+Please follow these guidelines:
 
-The bot uses GitHub Actions for automated deployment:
-- **Schedule**: Runs every 10 minutes
-- **Manual Trigger**: Can be started from Actions tab
-- **Timeout**: 9 minutes per run (GitHub Actions limit)
-- **State Persistence**: Uses GitHub Actions cache for state storage
-- **Error Handling**: Uploads logs on failure
+-   Write clean, well-documented code.
+-   Include tests for new features or bug fixes.
+-   Adhere to the project's coding style.
 
-## Troubleshooting
+## License Information
 
-### Common Issues
+No license is specified. All rights reserved.
 
-1. **Bot not posting comments**
-   - Check that your Nostr private key is correct
-   - Verify your Stacker.News account has sufficient sats
-   - Check the GitHub Actions logs for error messages
+## Acknowledgments
 
-2. **Authentication errors**
-   - Ensure your Nostr private key is in the correct hex format
-   - Verify the key corresponds to your Stacker.News account
-
-3. **Rate limiting**
-   - The bot includes built-in delays to avoid API limits
-   - If you're hitting limits, increase `RATE_LIMIT_DELAY`
-
-### Debug Mode
-
-You can enable debug logging when running manually:
-1. Go to the Actions tab in your repository
-2. Click "Run workflow" on the bot workflow
-3. Check the "Enable debug logging" option
-
-### Checking Logs
-
-- GitHub Actions logs are available in the Actions tab
-- Failed runs automatically upload logs as artifacts
-- Local runs output to console
-
-## Privacy and Ethics
-
-This bot is designed to:
-- Promote privacy-friendly alternatives to YouTube
-- Respect Stacker.News community guidelines
-- Avoid spam through intelligent state management
-- Provide helpful information to users
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test locally
-5. Submit a pull request
-
-## License
-
-MIT License - feel free to use and modify as needed.
-
-## Support
-
-If you encounter issues:
-- Check the GitHub Actions logs
-- Verify your Nostr configuration
-- Ensure your Stacker.News account has sats
-- Open an issue in this repository
-
----
-
-**Note**: This bot is for educational and utility purposes. Please use responsibly and respect Stacker.News community guidelines.
+-   This project leverages the [Nostr](https://nostr.com/) protocol for secure communication.
+-   Thanks to the [Stacker.News](https://stacker.news) community for inspiring this project.
+-   Special thanks to the [Yewtu.be](https://yewtu.be) project for providing a privacy-friendly YouTube alternative.
