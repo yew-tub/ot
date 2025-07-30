@@ -18,7 +18,7 @@
 
 ```
                   
-A bot that monitors [Stacker.News](https://stacker.news) for YouTube links and automatically posts comments with privacy-friendly [Yewtu.be](https://yewtu.be) alternatives.
+A bot that monitors [Stacker.News](https://stacker.news/r/YewTuBot) for YouTube links and automatically posts comments with privacy-friendly [Yewtu.be](https://yewtu.be) alternatives.
 
 ```bash
 ₿ loading... 
@@ -169,5 +169,5 @@ No license is specified. All rights reserved.
 ## Acknowledgments
 
 -   This project leverages the [Nostr](https://nostr.com/) protocol for secure communication.
--   Thanks to the [Stacker.News](https://stacker.news) community for inspiring this project.
+-   Thanks to the [Stacker.News](https://stacker.news/r/YewTuBot) community for inspiring this project.
 -   Special thanks to the [Yewtu.be](https://yewtu.be) project for providing a privacy-friendly YouTube alternative.
