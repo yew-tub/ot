@@ -16,7 +16,7 @@ const CONFIG = {
   STACKER_NEWS_BASE: 'https://stacker.news',
   YEWTU_BE_BASE: 'https://yewtu.be',
   COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}',
-  NOSTR_NOTE_TEMPLATE: '{title}\n\n{stackerLink}/r/YewTuBot\n\n#YewTuBot #Video #watch #grownostr #Videostr #INVIDIOUS', // Privacy-friendly YouTube: {yewtuLink}
+  NOSTR_NOTE_TEMPLATE: '{title}\n\n{stackerLink}/r/YewTuBot\n\n#YewTuBot #Video #watch #grownostr #Videostr #INVIDIOUS',
   SCAN_LIMIT: 50, // Number of recent posts to scan
   RATE_LIMIT_DELAY: 2000, // ms between API calls
   STATE_FILE: './.bot-state.json',
@@ -38,9 +38,9 @@ const YOUTUBE_PATTERNS = [
   /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi
 ];
 
-// GraphQL queries
+// GraphQL queries - Updated with better recent items queries
 const QUERIES = {
-  // Detailed introspection to understand parameter types
+  // Updated introspection query to understand the items field better
   DETAILED_INTROSPECTION: `
     query {
       __schema {
@@ -79,10 +79,10 @@ const QUERIES = {
     }
   `,
   
-  // Test items with no arguments
-  TEST_ITEMS_NO_ARGS: `
-    query {
-      items {
+  // Primary query for recent items - this should match stacker.news/recent
+  RECENT_ITEMS: `
+    query recentItems($sort: String!, $limit: Int) {
+      items(sort: $sort, limit: $limit) {
         items {
           id
           title
@@ -97,10 +97,67 @@ const QUERIES = {
       }
     }
   `,
-  
-  // Test items with sort only (String type)
-  TEST_ITEMS_SORT_ONLY: `
-    query testItemsSort($sort: String) {
+
+  // Alternative recent items query without limit
+  RECENT_ITEMS_NO_LIMIT: `
+    query recentItemsNoLimit($sort: String!) {
+      items(sort: $sort) {
+        items {
+          id
+          title
+          text
+          url
+          createdAt
+          user {
+            name
+          }
+        }
+        cursor
+      }
+    }
+  `,
+
+  // Alternative query using "recent" as sort parameter
+  RECENT_ITEMS_ALT: `
+    query recentItemsAlt($sort: String!) {
+      items(sort: $sort) {
+        items {
+          id
+          title
+          text
+          url
+          createdAt
+          user {
+            name
+          }
+        }
+        cursor
+      }
+    }
+  `,
+
+  // Query with when parameter for time-based filtering
+  RECENT_ITEMS_WHEN: `
+    query recentItemsWhen($when: String!) {
+      items(when: $when) {
+        items {
+          id
+          title
+          text
+          url
+          createdAt
+          user {
+            name
+          }
+        }
+        cursor
+      }
+    }
+  `,
+
+  // Test items with different sort values
+  TEST_ITEMS_RECENT_SORT: `
+    query testItemsRecentSort($sort: String!) {
       items(sort: $sort) {
         items {
           id
@@ -117,48 +174,10 @@ const QUERIES = {
     }
   `,
   
-  // Test items with different limit approaches
-  TEST_ITEMS_LIMIT_INT: `
-    query testItemsLimitInt($limit: Int) {
-      items(limit: $limit) {
-        items {
-          id
-          title
-          text
-          url
-          createdAt
-          user {
-            name
-          }
-        }
-        cursor
-      }
-    }
-  `,
-  
-  // Test items with Limit scalar type
-  TEST_ITEMS_LIMIT_SCALAR: `
-    query testItemsLimitScalar($limit: Limit) {
-      items(limit: $limit) {
-        items {
-          id
-          title
-          text
-          url
-          createdAt
-          user {
-            name
-          }
-        }
-        cursor
-      }
-    }
-  `,
-  
-  // Test with from parameter
-  TEST_ITEMS_FROM: `
-    query testItemsFrom($from: String) {
-      items(from: $from) {
+  // Fallback - items with no arguments (current working query)
+  TEST_ITEMS_NO_ARGS: `
+    query {
+      items {
         items {
           id
           title
@@ -318,37 +337,62 @@ class StackerNewsBot {
       return this.workingQuery;
     }
 
-    console.log('\nTesting different query approaches...');
+    console.log('\nTesting different query approaches for recent items...');
     
     // Discover parameter types first
     await this.discoverParameterTypes();
     
-    // Test queries in order of complexity
+    // Test queries in order of preference - prioritizing recent items
     const queryTests = [
       {
-        name: 'NO_ARGS',
-        query: QUERIES.TEST_ITEMS_NO_ARGS,
-        variables: {}
+        name: 'RECENT_ITEMS_NEW',
+        query: QUERIES.RECENT_ITEMS,
+        variables: { sort: 'new', limit: CONFIG.SCAN_LIMIT }
       },
       {
-        name: 'SORT_ONLY',
-        query: QUERIES.TEST_ITEMS_SORT_ONLY,
+        name: 'RECENT_ITEMS_RECENT',
+        query: QUERIES.RECENT_ITEMS,
+        variables: { sort: 'recent', limit: CONFIG.SCAN_LIMIT }
+      },
+      {
+        name: 'RECENT_ITEMS_LATEST', 
+        query: QUERIES.RECENT_ITEMS,
+        variables: { sort: 'latest', limit: CONFIG.SCAN_LIMIT }
+      },
+      {
+        name: 'RECENT_ITEMS_NO_LIMIT_NEW',
+        query: QUERIES.RECENT_ITEMS_NO_LIMIT,
+        variables: { sort: 'new' }
+      },
+      {
+        name: 'RECENT_ITEMS_NO_LIMIT_RECENT',
+        query: QUERIES.RECENT_ITEMS_NO_LIMIT,
         variables: { sort: 'recent' }
       },
       {
-        name: 'FROM_ONLY',
-        query: QUERIES.TEST_ITEMS_FROM,
-        variables: { from: '' }
+        name: 'RECENT_ITEMS_WHEN_DAY',
+        query: QUERIES.RECENT_ITEMS_WHEN,
+        variables: { when: 'day' }
       },
       {
-        name: 'LIMIT_INT',
-        query: QUERIES.TEST_ITEMS_LIMIT_INT,
-        variables: { limit: 10 }
+        name: 'RECENT_ITEMS_WHEN_WEEK',
+        query: QUERIES.RECENT_ITEMS_WHEN,
+        variables: { when: 'week' }
       },
       {
-        name: 'LIMIT_SCALAR',
-        query: QUERIES.TEST_ITEMS_LIMIT_SCALAR,
-        variables: { limit: 10 }
+        name: 'TEST_RECENT_SORT_NEW',
+        query: QUERIES.TEST_ITEMS_RECENT_SORT,
+        variables: { sort: 'new' }
+      },
+      {
+        name: 'TEST_RECENT_SORT_RECENT',
+        query: QUERIES.TEST_ITEMS_RECENT_SORT,
+        variables: { sort: 'recent' }
+      },
+      {
+        name: 'NO_ARGS_FALLBACK',
+        query: QUERIES.TEST_ITEMS_NO_ARGS,
+        variables: {}
       }
     ];
 
@@ -361,9 +405,23 @@ class StackerNewsBot {
         if (response && response.items && response.items.items && Array.isArray(response.items.items)) {
           console.log(`✓ ${test.name} succeeded! Got ${response.items.items.length} items`);
           
-          // Show sample item structure
+          // Show sample item structure and check if items are actually recent
           if (response.items.items.length > 0) {
-            console.log('Sample item:', JSON.stringify(response.items.items[0], null, 2));
+            const sampleItem = response.items.items[0];
+            console.log('Sample item:', JSON.stringify(sampleItem, null, 2));
+            
+            // Check if items are sorted by creation time (most recent first)
+            if (response.items.items.length > 1) {
+              const firstItemTime = new Date(response.items.items[0].createdAt);
+              const secondItemTime = new Date(response.items.items[1].createdAt);
+              const isRecentFirst = firstItemTime >= secondItemTime;
+              console.log(`Items are sorted by recency: ${isRecentFirst}`);
+              
+              // If this query returns items sorted by recency, prioritize it
+              if (isRecentFirst && test.name.includes('RECENT')) {
+                console.log(`✓ ${test.name} returns items in chronological order - perfect for recent posts!`);
+              }
+            }
           }
           
           this.workingQuery = {
@@ -445,20 +503,8 @@ class StackerNewsBot {
         await this.findWorkingQuery();
       }
 
-      // Build query with appropriate limit for production use
-      let variables = { ...this.workingQuery.variables };
-      
-      // If this is the working query and it supports parameters, set appropriate values
-      if (this.workingQuery.name === 'SORT_ONLY') {
-        variables = { sort: 'recent' };
-      } else if (this.workingQuery.name === 'LIMIT_INT') {
-        variables = { limit: CONFIG.SCAN_LIMIT };
-      } else if (this.workingQuery.name === 'LIMIT_SCALAR') {
-        variables = { limit: CONFIG.SCAN_LIMIT };
-      }
-
-      console.log(`Using query: ${this.workingQuery.name} with variables:`, variables);
-      const response = await this.makeGraphQLRequest(this.workingQuery.query, variables);
+      console.log(`Using query: ${this.workingQuery.name} with variables:`, this.workingQuery.variables);
+      const response = await this.makeGraphQLRequest(this.workingQuery.query, this.workingQuery.variables);
       
       // Extract items
       let items = [];
@@ -467,6 +513,18 @@ class StackerNewsBot {
       }
 
       console.log(`Successfully fetched ${items.length} items`);
+      
+      // Log some timing info to verify we're getting recent items
+      if (items.length > 0) {
+        const newestItem = items[0];
+        const oldestItem = items[items.length - 1];
+        console.log(`Newest item: ${newestItem.createdAt} (ID: ${newestItem.id})`);
+        console.log(`Oldest item: ${oldestItem.createdAt} (ID: ${oldestItem.id})`);
+        
+        const timeDiff = new Date(newestItem.createdAt) - new Date(oldestItem.createdAt);
+        console.log(`Time span: ${Math.round(timeDiff / (1000 * 60))} minutes`);
+      }
+      
       return items.filter(item => item && item.id); // Filter out null/undefined items
     } catch (error) {
       console.error('Error fetching posts:', error);
@@ -642,6 +700,7 @@ class StackerNewsBot {
       const commentText = CONFIG.COMMENT_TEMPLATE.replace('{link}', yewtubeUrl);
       
       console.log(`Found YouTube link in post ${post.id}: ${originalYouTubeUrl}`);
+      console.log(`Created: ${post.createdAt}, User: ${post.user?.name || 'Unknown'}`);
       console.log(`Posting comment with yewtu.be alternative: ${yewtubeUrl}`);
       
       // Post comment on Stacker.News
@@ -672,7 +731,7 @@ class StackerNewsBot {
     this.isRunning = true;
     
     try {
-      console.log('Starting Stacker.News YouTube Bot...');
+      console.log('Starting Stacker.News YouTube Bot (Recent Items Focus)...');
       console.log(`Bot public key: ${this.publicKey}`);
       
       // Load previous state
