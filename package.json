@@ -19,7 +19,7 @@
     "privacy"
   ],
   "author": "Yew Tu Bot",
-  "license": "MIT",
+  "license": "GPL3",
   "dependencies": {
     "graphql-request": "^6.1.0",
     "nostr-tools": "^2.1.0"
