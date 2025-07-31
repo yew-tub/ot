@@ -1,7 +1,7 @@
 {
-  "name": "stacker-news-youtube-bot",
-  "version": "2.0.0",
-  "description": "A bot that monitors Stacker.News for YouTube links and posts yewtu.be alternatives",
+  "name": "yewtubot",
+  "version": "2.1.0",
+  "description": "A bot that monitors Stacker.News for YouTu.be links and posts YewTu.be alternatives",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js",
@@ -18,7 +18,7 @@
     "bot",
     "privacy"
   ],
-  "author": "Your Name",
+  "author": "Yew Tu Bot",
   "license": "MIT",
   "dependencies": {
     "graphql-request": "^6.1.0",
