@@ -863,8 +863,9 @@ class StackerNewsBot {
     });
   }
 
-
   async postComment(postId, text) {
+    Logger.debug('Posting comment', { postId, textLength: text.length });
+    
     try {
       // Try the standard mutation first
       let response;
@@ -873,37 +874,59 @@ class StackerNewsBot {
           parentId: postId,
           text: text
         });
+        Logger.debug('Comment posted successfully', { commentId: response.createComment?.id });
       } catch (error) {
+        Logger.debug('Standard mutation failed, trying alternative parameter name', { error: error.message });
         // Try alternative parameter name
         response = await this.client.request(QUERIES.POST_COMMENT.replace('parentId', 'id'), {
           id: postId,
           text: text
         });
+        Logger.debug('Comment posted with alternative parameters', { commentId: response.createComment?.id });
       }
       
       return response.createComment;
     } catch (error) {
-      console.error('Error posting comment:', error);
+      Logger.error('Error posting comment', { error: error.message, postId, textPreview: text.slice(0, 50) });
       throw error;
     }
   }
 
   async processPost(post) {
+    Logger.debug(`Processing post ${post.id}`, {
+      id: post.id,
+      title: post.title?.slice(0, 50) + (post.title?.length > 50 ? '...' : ''),
+      hasText: !!post.text,
+      hasUrl: !!post.url,
+      createdAt: post.createdAt,
+      user: post.user?.name
+    });
+
     if (this.processedPosts.has(post.id)) {
+      Logger.debug(`Post ${post.id} already processed, skipping`);
       return false;
     }
 
     const content = `${post.title || ''} ${post.text || ''} ${post.url || ''}`;
+    Logger.debug(`Checking content for YouTube links`, {
+      contentLength: content.length,
+      contentPreview: content.slice(0, 100) + (content.length > 100 ? '...' : '')
+    });
+    
     const videoId = this.extractYouTubeId(content);
     
     if (!videoId) {
+      Logger.debug(`No YouTube ID found in post ${post.id}`);
       this.processedPosts.add(post.id);
       return false;
     }
 
+    Logger.info(`📺 YouTube content detected in post ${post.id}`, { videoId });
+
     // Find the original YouTube URL to convert
     let originalYouTubeUrl = null;
-    for (const pattern of YOUTUBE_PATTERNS) {
+    for (let i = 0; i < YOUTUBE_PATTERNS.length; i++) {
+      const pattern = YOUTUBE_PATTERNS[i];
       pattern.lastIndex = 0;
       const match = pattern.exec(content);
       if (match) {
@@ -912,11 +935,13 @@ class StackerNewsBot {
         if (!originalYouTubeUrl.startsWith('http')) {
           originalYouTubeUrl = 'https://' + originalYouTubeUrl;
         }
+        Logger.debug(`Found YouTube URL with pattern ${i + 1}`, { originalYouTubeUrl });
         break;
       }
     }
 
     if (!originalYouTubeUrl) {
+      Logger.warn(`Video ID found but no URL extracted for post ${post.id}`);
       this.processedPosts.add(post.id);
       return false;
     }
@@ -925,23 +950,43 @@ class StackerNewsBot {
       const yewtubeUrl = this.convertToYewTube(originalYouTubeUrl, videoId);
       const commentText = CONFIG.COMMENT_TEMPLATE.replace('{link}', yewtubeUrl);
       
-      console.log(`Found YouTube link in post ${post.id}: ${originalYouTubeUrl}`);
-      console.log(`Created: ${post.createdAt}, User: ${post.user?.name || 'Unknown'}`);
-      console.log(`Posting comment with yewtu.be alternative: ${yewtubeUrl}`);
+      Logger.info(`🔄 Processing YouTube link in post ${post.id}`, {
+        originalUrl: originalYouTubeUrl,
+        yewtubeUrl: yewtubeUrl,
+        postDetails: {
+          title: post.title?.slice(0, 50) + (post.title?.length > 50 ? '...' : ''),
+          createdAt: post.createdAt,
+          user: post.user?.name || 'Unknown',
+          age: Math.round((Date.now() - new Date(post.createdAt).getTime()) / (1000 * 60)) + ' minutes ago'
+        }
+      });
       
       // Post comment on Stacker.News
+      Logger.info(`💬 Posting comment on post ${post.id}...`);
       await this.postComment(post.id, commentText);
-      console.log(`Successfully posted comment on post ${post.id}`);
+      Logger.info(`✅ Comment posted successfully on post ${post.id}`);
       
       // Publish Nostr note
-      await this.publishNostrNote(post.title, post.id, yewtubeUrl);
+      Logger.info(`📡 Publishing Nostr note for post ${post.id}...`);
+      const nostrResult = await this.publishNostrNote(post.title, post.id, yewtubeUrl);
+      Logger.info(`✅ Nostr note published for post ${post.id}`, nostrResult);
       
       this.processedPosts.add(post.id);
       
-      console.log(`Successfully processed post ${post.id} (comment + Nostr note)`);
+      Logger.info(`🎉 Successfully processed post ${post.id}`, {
+        actions: ['comment_posted', 'nostr_note_published'],
+        yewtubeUrl,
+        nostrRelaysSuccess: nostrResult.successful
+      });
+      
       return true;
     } catch (error) {
-      console.error(`Failed to post comment on post ${post.id}:`, error);
+      Logger.error(`❌ Failed to process post ${post.id}`, {
+        error: error.message,
+        originalUrl: originalYouTubeUrl,
+        videoId
+      });
+      
       // Mark as processed to avoid retry loops
       this.processedPosts.add(post.id);
       return false;
@@ -950,54 +995,94 @@ class StackerNewsBot {
 
   async run() {
     if (this.isRunning) {
-      console.log('Bot is already running');
+      Logger.warn('Bot is already running');
       return;
     }
 
     this.isRunning = true;
+    const startTime = Date.now();
     
     try {
-      console.log('Starting Stacker.News YouTube Bot (Recent Items Focus)...');
-      console.log(`Bot public key: ${this.publicKey}`);
+      Logger.info('🚀 Starting Stacker.News YouTube Bot (Enhanced Debug Mode)');
+      Logger.info('Bot Configuration', {
+        publicKey: this.publicKey,
+        scanLimit: CONFIG.SCAN_LIMIT,
+        rateLimit: CONFIG.RATE_LIMIT_DELAY + 'ms',
+        debugMode: CONFIG.DEBUG,
+        nostrRelaysCount: CONFIG.NOSTR_RELAYS.length
+      });
       
       // Load previous state
       await this.loadState();
       
       // Authenticate with Nostr
-      console.log('Authenticating with Nostr...');
       await this.authenticateWithNostr();
       
       // Fetch recent posts
-      console.log('Fetching recent posts...');
       const posts = await this.fetchRecentPosts();
-      console.log(`Found ${posts.length} recent posts`);
+      Logger.step(6, 8, `Processing ${posts.length} posts`);
       
       let processedCount = 0;
       let commentedCount = 0;
       let nostrNotesCount = 0;
+      let youtubeLinksFound = 0;
       
       // Process each post
-      for (const post of posts) {
+      for (let i = 0; i < posts.length; i++) {
+        const post = posts[i];
+        Logger.info(`[${i + 1}/${posts.length}] Processing post ${post.id}...`);
+        
         const result = await this.processPost(post);
         if (result) {
           commentedCount++;
           nostrNotesCount++;
+          youtubeLinksFound++;
         }
         processedCount++;
         
-        // Rate limiting
-        if (processedCount < posts.length) {
+        // Rate limiting between posts
+        if (i < posts.length - 1) {
+          Logger.debug(`Rate limiting: waiting ${CONFIG.RATE_LIMIT_DELAY}ms before next post...`);
           await this.sleep(CONFIG.RATE_LIMIT_DELAY);
         }
       }
       
+      Logger.step(7, 8, 'Saving state and generating summary');
+      
       // Save state
       await this.saveState();
       
-      console.log(`Run completed: ${processedCount} posts processed, ${commentedCount} comments posted, ${nostrNotesCount} Nostr notes published`);
+      Logger.step(8, 8, 'Run completed successfully');
+      
+      const runTime = Math.round((Date.now() - startTime) / 1000);
+      const summary = {
+        runtime: `${runTime}s`,
+        postsProcessed: processedCount,
+        youtubeLinksFound: youtubeLinksFound,
+        commentsPosted: commentedCount,
+        nostrNotesPublished: nostrNotesCount,
+        successRate: processedCount > 0 ? `${Math.round(youtubeLinksFound / processedCount * 100)}%` : '0%',
+        workingQuery: this.workingQuery?.name || 'none',
+        totalProcessedPosts: this.processedPosts.size
+      };
+      
+      Logger.info('🏁 Bot run completed', summary);
+      
+      // Performance insights
+      if (youtubeLinksFound === 0 && processedCount > 0) {
+        Logger.warn('⚠️  No YouTube links found in any posts. This might indicate:');
+        Logger.warn('   - Posts are too old (YouTube content might be in newer posts)');
+        Logger.warn('   - Query is not fetching recent items correctly');
+        Logger.warn('   - YouTube content is rare in the current time period');
+        Logger.info('💡 Consider checking if the working query is fetching recent posts correctly');
+      }
+      
+      if (commentedCount > 0) {
+        Logger.info(`📊 Engagement rate: Found YouTube content in ${youtubeLinksFound}/${processedCount} posts (${Math.round(youtubeLinksFound/processedCount*100)}%)`);
+      }
       
     } catch (error) {
-      console.error('Bot run failed:', error);
+      Logger.error('💥 Bot run failed', { error: error.message, stack: error.stack });
       process.exit(1);
     } finally {
       this.isRunning = false;
@@ -1009,35 +1094,38 @@ class StackerNewsBot {
   }
 
   async cleanup() {
-    console.log('Cleaning up...');
+    Logger.info('🧹 Cleaning up bot resources...');
     
     // Close Nostr pool connections
     if (this.nostrPool) {
       try {
         this.nostrPool.close(CONFIG.NOSTR_RELAYS);
-        console.log('Closed Nostr relay connections');
+        Logger.info('✅ Closed Nostr relay connections');
       } catch (error) {
-        console.log('Error closing Nostr connections:', error.message);
+        Logger.warn('⚠️  Error closing Nostr connections', { error: error.message });
       }
     }
     
     await this.saveState();
+    Logger.info('🏁 Cleanup completed');
   }
 }
 
 // Main execution
 async function main() {
+  Logger.info('🎬 Initializing Stacker.News YouTube Bot...');
+  
   const bot = new StackerNewsBot();
   
   // Handle graceful shutdown
   process.on('SIGINT', async () => {
-    console.log('\nReceived SIGINT, shutting down gracefully...');
+    Logger.info('🛑 Received SIGINT, shutting down gracefully...');
     await bot.cleanup();
     process.exit(0);
   });
   
   process.on('SIGTERM', async () => {
-    console.log('\nReceived SIGTERM, shutting down gracefully...');
+    Logger.info('🛑 Received SIGTERM, shutting down gracefully...');
     await bot.cleanup();
     process.exit(0);
   });
@@ -1045,7 +1133,7 @@ async function main() {
   try {
     await bot.run();
   } catch (error) {
-    console.error('Fatal error:', error);
+    Logger.error('💀 Fatal error occurred', { error: error.message, stack: error.stack });
     process.exit(1);
   }
 }
