@@ -17,7 +17,7 @@ const CONFIG = {
   YEWTU_BE_BASE: 'https://yewtu.be',
   COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}',
   NOSTR_NOTE_TEMPLATE: '{title}\n\n{stackerLink}/r/YewTuBot\n\n#YewTuBot #Video #watch #grownostr #Videostr #INVIDIOUS',
-  SCAN_LIMIT: 50, // Number of recent posts to scan
+  SCAN_LIMIT: 210, // Number of recent posts to scan
   RATE_LIMIT_DELAY: 2000, // ms between API calls
   STATE_FILE: './.bot-state.json',
   NOSTR_RELAYS: [
