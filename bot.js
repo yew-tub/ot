@@ -40,9 +40,9 @@ const YOUTUBE_PATTERNS = [
   /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi
 ];
 
-// Enhanced GraphQL queries with comprehensive testing
+// Enhanced GraphQL queries - FIXED FOR RECENT ITEMS
 const QUERIES = {
-  // Deep introspection to understand the complete schema
+  // Schema introspection to understand available parameters
   COMPREHENSIVE_INTROSPECTION: `
     query comprehensiveIntrospection {
       __schema {
@@ -82,18 +82,25 @@ const QUERIES = {
     }
   `,
 
-  // Test query variations based on common GraphQL patterns
-  // Pattern 1: Using 'sort' parameter with different values
-  ITEMS_WITH_SORT: `
-    query itemsWithSort($sort: String) {
-      items(sort: $sort) {
+  // PRIMARY QUERY - This should match stacker.news/recent behavior
+  RECENT_ITEMS_PRIMARY: `
+    query recentItems($limit: Int, $cursor: String) {
+      items(limit: $limit, cursor: $cursor) {
         items {
           id
           title
           text
           url
           createdAt
+          updatedAt
+          sats
+          boost
+          ncomments
           user {
+            name
+            id
+          }
+          sub {
             name
           }
         }
@@ -102,17 +109,25 @@ const QUERIES = {
     }
   `,
 
-  // Pattern 2: Using 'when' parameter (time-based filtering)
-  ITEMS_WITH_WHEN: `
-    query itemsWithWhen($when: String) {
-      items(when: $when) {
+  // ALTERNATIVE 1 - Sort by creation time explicitly
+  RECENT_ITEMS_BY_TIME: `
+    query recentItemsByTime($limit: Int, $sort: ItemSort) {
+      items(limit: $limit, sort: $sort) {
         items {
           id
           title
           text
           url
           createdAt
+          updatedAt
+          sats
+          boost
+          ncomments
           user {
+            name
+            id
+          }
+          sub {
             name
           }
         }
@@ -121,17 +136,25 @@ const QUERIES = {
     }
   `,
 
-  // Pattern 3: Using both sort and when
-  ITEMS_WITH_SORT_AND_WHEN: `
-    query itemsWithSortAndWhen($sort: String, $when: String) {
-      items(sort: $sort, when: $when) {
+  // ALTERNATIVE 2 - With when parameter for recent timeframe
+  RECENT_ITEMS_WITH_WHEN: `
+    query recentItemsWithWhen($limit: Int, $when: String, $sort: String) {
+      items(limit: $limit, when: $when, sort: $sort) {
         items {
           id
           title
           text
           url
           createdAt
+          updatedAt
+          sats
+          boost
+          ncomments
           user {
+            name
+            id
+          }
+          sub {
             name
           }
         }
@@ -140,17 +163,25 @@ const QUERIES = {
     }
   `,
 
-  // Pattern 4: Using limit parameter
-  ITEMS_WITH_LIMIT: `
-    query itemsWithLimit($limit: Int) {
-      items(limit: $limit) {
+  // ALTERNATIVE 3 - Direct recent sort attempt
+  RECENT_ITEMS_SORT_RECENT: `
+    query recentItemsSortRecent($limit: Int) {
+      items(limit: $limit, sort: "recent") {
         items {
           id
           title
           text
           url
           createdAt
+          updatedAt
+          sats
+          boost
+          ncomments
           user {
+            name
+            id
+          }
+          sub {
             name
           }
         }
@@ -159,36 +190,25 @@ const QUERIES = {
     }
   `,
 
-  // Pattern 5: All possible parameters
-  ITEMS_FULL_PARAMS: `
-    query itemsFullParams($sort: String, $when: String, $limit: Int) {
-      items(sort: $sort, when: $when, limit: $limit) {
+  // ALTERNATIVE 4 - Try with different sort values
+  ITEMS_SORT_TEST: `
+    query itemsSortTest($limit: Int, $sort: String) {
+      items(limit: $limit, sort: $sort) {
         items {
           id
           title
           text
           url
           createdAt
+          updatedAt
+          sats
+          boost
+          ncomments
           user {
             name
+            id
           }
-        }
-        cursor
-      }
-    }
-  `,
-
-  // Fallback - no parameters
-  ITEMS_NO_PARAMS: `
-    query itemsNoParams {
-      items {
-        items {
-          id
-          title
-          text
-          url
-          createdAt
-          user {
+          sub {
             name
           }
         }
@@ -435,80 +455,70 @@ class StackerNewsBot {
     // First discover the schema
     await this.discoverSchema();
     
-    // Define test queries based on common patterns and schema discovery
+    // Define test queries in priority order - most likely to work first
     const queryTests = [
-      // Test common sort values for recent items
+      // Priority 1: Default items query (most likely to return recent items)
       {
-        name: 'SORT_NEW',
-        query: QUERIES.ITEMS_WITH_SORT,
-        variables: { sort: 'new' },
-        description: 'Sort by newest items'
+        name: 'DEFAULT_RECENT',
+        query: QUERIES.RECENT_ITEMS_PRIMARY,
+        variables: { limit: CONFIG.SCAN_LIMIT },
+        description: 'Default items query (should return recent items like /recent page)'
       },
+      
+      // Priority 2: Try with no sort (might default to recent)
+      {
+        name: 'NO_SORT_LIMITED',
+        query: QUERIES.RECENT_ITEMS_PRIMARY,
+        variables: { limit: CONFIG.SCAN_LIMIT },
+        description: 'Items with limit only, no sort parameter'
+      },
+      
+      // Priority 3: Try different sort enum values based on schema discovery
       {
         name: 'SORT_RECENT',
-        query: QUERIES.ITEMS_WITH_SORT,
-        variables: { sort: 'recent' },
-        description: 'Sort by recent items'
+        query: QUERIES.ITEMS_SORT_TEST,
+        variables: { limit: CONFIG.SCAN_LIMIT, sort: 'recent' },
+        description: 'Sort by recent'
+      },
+      {
+        name: 'SORT_NEW',
+        query: QUERIES.ITEMS_SORT_TEST,
+        variables: { limit: CONFIG.SCAN_LIMIT, sort: 'new' },
+        description: 'Sort by new'
       },
       {
         name: 'SORT_LATEST',
-        query: QUERIES.ITEMS_WITH_SORT,
-        variables: { sort: 'latest' },
-        description: 'Sort by latest items'
-      },
-      {
-        name: 'SORT_TIME',
-        query: QUERIES.ITEMS_WITH_SORT,
-        variables: { sort: 'time' },
-        description: 'Sort by time'
-      },
-      {
-        name: 'SORT_CREATED',
-        query: QUERIES.ITEMS_WITH_SORT,
-        variables: { sort: 'created' },
-        description: 'Sort by creation time'
+        query: QUERIES.ITEMS_SORT_TEST,
+        variables: { limit: CONFIG.SCAN_LIMIT, sort: 'latest' },
+        description: 'Sort by latest'
       },
       
-      // Test when parameter (time-based filtering)
+      // Priority 4: Try with when parameter
       {
         name: 'WHEN_DAY',
-        query: QUERIES.ITEMS_WITH_WHEN,
-        variables: { when: 'day' },
+        query: QUERIES.RECENT_ITEMS_WITH_WHEN,
+        variables: { limit: CONFIG.SCAN_LIMIT, when: 'day' },
         description: 'Items from today'
       },
       {
         name: 'WHEN_ALL',
-        query: QUERIES.ITEMS_WITH_WHEN,
-        variables: { when: 'all' },
-        description: 'All items (no time filter)'
+        query: QUERIES.RECENT_ITEMS_WITH_WHEN,
+        variables: { limit: CONFIG.SCAN_LIMIT, when: 'all' },
+        description: 'All items, no time filter'
       },
       
-      // Test combinations
+      // Priority 5: Combinations
       {
         name: 'SORT_NEW_WHEN_DAY',
-        query: QUERIES.ITEMS_WITH_SORT_AND_WHEN,
-        variables: { sort: 'new', when: 'day' },
+        query: QUERIES.RECENT_ITEMS_WITH_WHEN,
+        variables: { limit: CONFIG.SCAN_LIMIT, sort: 'new', when: 'day' },
         description: 'New items from today'
       },
       {
-        name: 'SORT_NEW_WITH_LIMIT',
-        query: QUERIES.ITEMS_FULL_PARAMS,
-        variables: { sort: 'new', limit: CONFIG.SCAN_LIMIT },
-        description: 'New items with limit'
-      },
-      
-      // Fallback options
-      {
-        name: 'LIMIT_ONLY',
-        query: QUERIES.ITEMS_WITH_LIMIT,
-        variables: { limit: CONFIG.SCAN_LIMIT },
-        description: 'Items with limit only'
-      },
-      {
-        name: 'NO_PARAMS',
-        query: QUERIES.ITEMS_NO_PARAMS,
-        variables: {},
-        description: 'Items with no parameters (fallback)'
+        name: 'SORT_RECENT_WHEN_ALL',
+        query: QUERIES.RECENT_ITEMS_WITH_WHEN,
+        variables: { limit: CONFIG.SCAN_LIMIT, sort: 'recent', when: 'all' },
+        description: 'Recent items, all time'
       }
     ];
 
@@ -532,7 +542,7 @@ class StackerNewsBot {
             
             // Analyze item timestamps to determine if they're sorted by recency
             if (items.length > 1) {
-              const timestamps = items.slice(0, 5).map(item => ({
+              const timestamps = items.slice(0, Math.min(5, items.length)).map(item => ({
                 id: item.id,
                 createdAt: item.createdAt,
                 timestamp: new Date(item.createdAt).getTime()
@@ -551,20 +561,30 @@ class StackerNewsBot {
               
               Logger.info(`Items sorted by recency (newest first): ${isRecentFirst}`);
               
-              // Calculate time span
+              // Calculate time span and recency
               const newestTime = Math.max(...timestamps.map(t => t.timestamp));
               const oldestTime = Math.min(...timestamps.map(t => t.timestamp));
               const timeSpanMinutes = Math.round((newestTime - oldestTime) / (1000 * 60));
+              const minutesSinceNewest = Math.round((Date.now() - newestTime) / (1000 * 60));
               
-              Logger.info(`Time span of fetched items: ${timeSpanMinutes} minutes`);
+              Logger.info(`Time analysis:`, {
+                timeSpanMinutes: timeSpanMinutes,
+                minutesSinceNewest: minutesSinceNewest,
+                isRecentData: minutesSinceNewest < 60 // Less than 1 hour old
+              });
               
-              // Priority scoring: prefer queries that return items sorted by recency
-              const score = isRecentFirst ? 100 : 50;
+              // Score this query based on how good it is for recent items
+              let score = 0;
+              if (isRecentFirst) score += 50;
+              if (minutesSinceNewest < 60) score += 30; // Very recent data
+              if (minutesSinceNewest < 720) score += 20; // Within 12 hours
+              if (timeSpanMinutes > 0) score += 10; // Has time diversity
+              
               Logger.info(`Query score: ${score}/100 (higher is better for recent items)`);
               
-              // If this looks like a good recent items query, use it
-              if (isRecentFirst || test.name.includes('NEW') || test.name.includes('RECENT')) {
-                Logger.info(`✓ Selected ${test.name} as working query`);
+              // Accept the first query that gives us properly sorted recent items
+              if (score >= 60 || (isRecentFirst && minutesSinceNewest < 1440)) { // 24 hours
+                Logger.info(`✓ Selected ${test.name} as working query (score: ${score})`);
                 
                 this.workingQuery = {
                   name: test.name,
@@ -572,7 +592,12 @@ class StackerNewsBot {
                   variables: test.variables,
                   description: test.description,
                   isRecentFirst: isRecentFirst,
-                  score: score
+                  score: score,
+                  testResults: {
+                    timeSpanMinutes,
+                    minutesSinceNewest,
+                    itemCount: items.length
+                  }
                 };
                 
                 return this.workingQuery;
@@ -596,7 +621,7 @@ class StackerNewsBot {
       }
     }
 
-    throw new Error('No working query found for fetching items');
+    throw new Error('No working query found for fetching recent items');
   }
 
   extractYouTubeId(text) {
@@ -696,6 +721,9 @@ class StackerNewsBot {
       let items = [];
       if (response && response.items && response.items.items && Array.isArray(response.items.items)) {
         items = response.items.items.filter(item => item && item.id);
+        
+        // CRITICAL FIX: Sort by createdAt descending to ensure newest first
+        items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       }
 
       Logger.info(`Successfully fetched ${items.length} items`);
@@ -707,13 +735,15 @@ class StackerNewsBot {
         const newestTime = new Date(newestItem.createdAt);
         const oldestTime = new Date(oldestItem.createdAt);
         const timeDiff = newestTime - oldestTime;
+        const minutesAgo = Math.round((Date.now() - newestTime.getTime()) / (1000 * 60));
         
         Logger.info('Fetched items analysis', {
           newestItem: {
             id: newestItem.id,
             title: newestItem.title?.slice(0, 50) + (newestItem.title?.length > 50 ? '...' : ''),
             createdAt: newestItem.createdAt,
-            user: newestItem.user?.name
+            user: newestItem.user?.name,
+            minutesAgo: minutesAgo
           },
           oldestItem: {
             id: oldestItem.id,
@@ -724,16 +754,23 @@ class StackerNewsBot {
           timeSpan: {
             minutes: Math.round(timeDiff / (1000 * 60)),
             hours: Math.round(timeDiff / (1000 * 3600)),
-            isRecentFirst: newestTime >= oldestTime
+            isNewestFirst: newestTime >= oldestTime,
+            freshness: minutesAgo < 60 ? 'very fresh' : minutesAgo < 720 ? 'recent' : 'older'
           }
         });
         
-        // Show more recent items for context
+        // Warning if data seems stale
+        if (minutesAgo > 120) { // 2 hours
+          Logger.warn(`⚠️  Newest item is ${minutesAgo} minutes old - may not be getting truly recent items`);
+        }
+        
+        // Show recent items sample for debugging
         if (items.length >= 5) {
-          Logger.debug('Recent items sample', items.slice(0, 5).map(item => ({
+          Logger.debug('Recent items sample (newest first)', items.slice(0, 5).map(item => ({
             id: item.id,
             title: item.title?.slice(0, 30) + '...',
             createdAt: item.createdAt,
+            minutesAgo: Math.round((Date.now() - new Date(item.createdAt).getTime()) / (1000 * 60)),
             hasUrl: !!item.url,
             hasText: !!item.text
           })));
