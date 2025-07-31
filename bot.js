@@ -3,6 +3,7 @@
 /**
  * Stacker.News YouTube Link Bot
  * Monitors for YouTube links and posts yewtu.be alternatives
+ * Enhanced with detailed debugging and proper recent items fetching
  */
 
 const { getPublicKey, finalizeEvent, verifyEvent, nip19, SimplePool } = require('nostr-tools');
@@ -17,9 +18,10 @@ const CONFIG = {
   YEWTU_BE_BASE: 'https://yewtu.be',
   COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}',
   NOSTR_NOTE_TEMPLATE: '{title}\n\n{stackerLink}/r/YewTuBot\n\n#YewTuBot #Video #watch #grownostr #Videostr #INVIDIOUS',
-  SCAN_LIMIT: 210, // Number of recent posts to scan
+  SCAN_LIMIT: 50, // Number of recent posts to scan
   RATE_LIMIT_DELAY: 2000, // ms between API calls
   STATE_FILE: './.bot-state.json',
+  DEBUG: process.env.DEBUG === 'true' || process.env.NODE_ENV !== 'production',
   NOSTR_RELAYS: [
     'wss://relay.stacker.news',
     'wss://relay.damus.io',
@@ -38,11 +40,11 @@ const YOUTUBE_PATTERNS = [
   /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi
 ];
 
-// GraphQL queries - Updated with better recent items queries
+// Enhanced GraphQL queries with comprehensive testing
 const QUERIES = {
-  // Updated introspection query to understand the items field better
-  DETAILED_INTROSPECTION: `
-    query {
+  // Deep introspection to understand the complete schema
+  COMPREHENSIVE_INTROSPECTION: `
+    query comprehensiveIntrospection {
       __schema {
         queryType {
           fields {
@@ -55,8 +57,13 @@ const QUERIES = {
                 ofType {
                   name
                   kind
+                  enumValues {
+                    name
+                    description
+                  }
                 }
               }
+              defaultValue
             }
             type {
               name
@@ -66,10 +73,6 @@ const QUERIES = {
                 type {
                   name
                   kind
-                  ofType {
-                    name
-                    kind
-                  }
                 }
               }
             }
@@ -78,29 +81,11 @@ const QUERIES = {
       }
     }
   `,
-  
-  // Primary query for recent items - this should match stacker.news/recent
-  RECENT_ITEMS: `
-    query recentItems($sort: String!, $limit: Int) {
-      items(sort: $sort, limit: $limit) {
-        items {
-          id
-          title
-          text
-          url
-          createdAt
-          user {
-            name
-          }
-        }
-        cursor
-      }
-    }
-  `,
 
-  // Alternative recent items query without limit
-  RECENT_ITEMS_NO_LIMIT: `
-    query recentItemsNoLimit($sort: String!) {
+  // Test query variations based on common GraphQL patterns
+  // Pattern 1: Using 'sort' parameter with different values
+  ITEMS_WITH_SORT: `
+    query itemsWithSort($sort: String) {
       items(sort: $sort) {
         items {
           id
@@ -117,28 +102,9 @@ const QUERIES = {
     }
   `,
 
-  // Alternative query using "recent" as sort parameter
-  RECENT_ITEMS_ALT: `
-    query recentItemsAlt($sort: String!) {
-      items(sort: $sort) {
-        items {
-          id
-          title
-          text
-          url
-          createdAt
-          user {
-            name
-          }
-        }
-        cursor
-      }
-    }
-  `,
-
-  // Query with when parameter for time-based filtering
-  RECENT_ITEMS_WHEN: `
-    query recentItemsWhen($when: String!) {
+  // Pattern 2: Using 'when' parameter (time-based filtering)
+  ITEMS_WITH_WHEN: `
+    query itemsWithWhen($when: String) {
       items(when: $when) {
         items {
           id
@@ -155,10 +121,10 @@ const QUERIES = {
     }
   `,
 
-  // Test items with different sort values
-  TEST_ITEMS_RECENT_SORT: `
-    query testItemsRecentSort($sort: String!) {
-      items(sort: $sort) {
+  // Pattern 3: Using both sort and when
+  ITEMS_WITH_SORT_AND_WHEN: `
+    query itemsWithSortAndWhen($sort: String, $when: String) {
+      items(sort: $sort, when: $when) {
         items {
           id
           title
@@ -173,10 +139,48 @@ const QUERIES = {
       }
     }
   `,
-  
-  // Fallback - items with no arguments (current working query)
-  TEST_ITEMS_NO_ARGS: `
-    query {
+
+  // Pattern 4: Using limit parameter
+  ITEMS_WITH_LIMIT: `
+    query itemsWithLimit($limit: Int) {
+      items(limit: $limit) {
+        items {
+          id
+          title
+          text
+          url
+          createdAt
+          user {
+            name
+          }
+        }
+        cursor
+      }
+    }
+  `,
+
+  // Pattern 5: All possible parameters
+  ITEMS_FULL_PARAMS: `
+    query itemsFullParams($sort: String, $when: String, $limit: Int) {
+      items(sort: $sort, when: $when, limit: $limit) {
+        items {
+          id
+          title
+          text
+          url
+          createdAt
+          user {
+            name
+          }
+        }
+        cursor
+      }
+    }
+  `,
+
+  // Fallback - no parameters
+  ITEMS_NO_PARAMS: `
+    query itemsNoParams {
       items {
         items {
           id
@@ -192,7 +196,7 @@ const QUERIES = {
       }
     }
   `,
-  
+
   // Comment mutation
   POST_COMMENT: `
     mutation createComment($parentId: ID!, $text: String!) {
@@ -202,6 +206,41 @@ const QUERIES = {
     }
   `
 };
+
+// Debug logging utility
+class Logger {
+  static log(level, message, data = null) {
+    const timestamp = new Date().toISOString();
+    const prefix = `[${timestamp}] [${level.toUpperCase()}]`;
+    
+    console.log(`${prefix} ${message}`);
+    if (data && CONFIG.DEBUG) {
+      console.log(`${prefix} Data:`, JSON.stringify(data, null, 2));
+    }
+  }
+
+  static debug(message, data = null) {
+    if (CONFIG.DEBUG) {
+      this.log('DEBUG', message, data);
+    }
+  }
+
+  static info(message, data = null) {
+    this.log('INFO', message, data);
+  }
+
+  static warn(message, data = null) {
+    this.log('WARN', message, data);
+  }
+
+  static error(message, data = null) {
+    this.log('ERROR', message, data);
+  }
+
+  static step(stepNumber, totalSteps, description) {
+    this.info(`[STEP ${stepNumber}/${totalSteps}] ${description}`);
+  }
+}
 
 // Helper function to convert nsec1 to hex
 function nsecToHex(nsecKey) {
@@ -219,6 +258,9 @@ function nsecToHex(nsecKey) {
 
 class StackerNewsBot {
   constructor() {
+    Logger.info('Initializing StackerNewsBot...');
+    Logger.debug('Configuration', CONFIG);
+    
     this.privateKey = this.getPrivateKey();
     this.publicKey = getPublicKey(this.privateKey);
     this.client = new GraphQLClient(CONFIG.STACKER_NEWS_API);
@@ -227,9 +269,15 @@ class StackerNewsBot {
     this.isRunning = false;
     this.workingQuery = null;
     this.schemaInfo = null;
+    
+    Logger.info('Bot initialized successfully', {
+      publicKey: this.publicKey,
+      apiEndpoint: CONFIG.STACKER_NEWS_API
+    });
   }
 
   getPrivateKey() {
+    Logger.debug('Getting private key from environment...');
     let privateKey = process.env.NOSTR_PRIVATE_KEY;
     
     if (!privateKey) {
@@ -238,225 +286,347 @@ class StackerNewsBot {
     
     // Convert nsec1 to hex if needed
     if (privateKey.startsWith('nsec1')) {
-      console.log('Converting nsec1 private key to hex format...');
+      Logger.info('Converting nsec1 private key to hex format...');
       privateKey = nsecToHex(privateKey);
+      Logger.debug('Private key converted successfully');
     }
     
     return privateKey;
   }
 
   async loadState() {
+    Logger.step(1, 8, 'Loading bot state');
     try {
       const stateData = await fs.readFile(CONFIG.STATE_FILE, 'utf8');
       const state = JSON.parse(stateData);
       this.processedPosts = new Set(state.processedPosts || []);
       this.workingQuery = state.workingQuery || null;
       this.schemaInfo = state.schemaInfo || null;
-      console.log(`Loaded ${this.processedPosts.size} processed posts from state`);
+      
+      Logger.info(`State loaded successfully`, {
+        processedPostsCount: this.processedPosts.size,
+        hasWorkingQuery: !!this.workingQuery,
+        hasSchemaInfo: !!this.schemaInfo,
+        workingQuery: this.workingQuery?.name || 'none'
+      });
     } catch (error) {
-      console.log('No previous state found, starting fresh');
+      Logger.info('No previous state found, starting fresh');
     }
   }
 
   async saveState() {
+    Logger.debug('Saving bot state...');
     const state = {
       processedPosts: Array.from(this.processedPosts),
       workingQuery: this.workingQuery,
       schemaInfo: this.schemaInfo,
       lastRun: new Date().toISOString()
     };
+    
     await fs.writeFile(CONFIG.STATE_FILE, JSON.stringify(state, null, 2));
-    console.log('State saved');
+    Logger.info('State saved successfully', {
+      processedPostsCount: this.processedPosts.size,
+      lastRun: state.lastRun
+    });
   }
 
   async makeGraphQLRequest(query, variables = {}) {
+    Logger.debug('Making GraphQL request', {
+      queryPreview: query.slice(0, 100) + '...',
+      variables
+    });
+    
     try {
       const response = await this.client.request(query, variables);
+      Logger.debug('GraphQL request successful', {
+        responseKeys: Object.keys(response || {}),
+        responseSize: JSON.stringify(response || {}).length
+      });
       return response;
     } catch (error) {
-      console.log(`GraphQL request failed: ${error.message}`);
-      if (error.response) {
-        console.log('Response details:', JSON.stringify({
-          response: {
-            errors: error.response.errors,
-            status: error.response.status,
-            headers: error.response.headers
-          },
-          request: {
-            query: query.slice(0, 200) + '...',
-            variables
-          }
-        }));
-      }
+      Logger.error(`GraphQL request failed: ${error.message}`, {
+        error: {
+          message: error.message,
+          response: error.response?.errors,
+          status: error.response?.status
+        },
+        request: {
+          queryPreview: query.slice(0, 200) + '...',
+          variables
+        }
+      });
       throw error;
     }
   }
 
-  async discoverParameterTypes() {
+  async discoverSchema() {
+    Logger.step(2, 8, 'Discovering GraphQL schema');
+    
     if (this.schemaInfo) {
+      Logger.info('Using cached schema information');
       return this.schemaInfo;
     }
 
     try {
-      console.log('Discovering parameter types for items field...');
-      const response = await this.makeGraphQLRequest(QUERIES.DETAILED_INTROSPECTION);
+      const response = await this.makeGraphQLRequest(QUERIES.COMPREHENSIVE_INTROSPECTION);
       
       // Find the items field in Query type
       const itemsField = response.__schema.queryType.fields.find(f => f.name === 'items');
       
       if (itemsField) {
-        console.log('\n=== Items Field Parameters ===');
+        Logger.info('Items field discovered successfully');
+        Logger.info('=== Items Field Parameters ===');
+        
+        const parameterInfo = {};
         itemsField.args.forEach(arg => {
           const typeName = arg.type.name || arg.type.ofType?.name || arg.type.kind;
-          console.log(`  - ${arg.name}: ${typeName} (${arg.type.kind})`);
+          const enumValues = arg.type.ofType?.enumValues || arg.type.enumValues || [];
+          
+          parameterInfo[arg.name] = {
+            type: typeName,
+            kind: arg.type.kind,
+            enumValues: enumValues.map(ev => ev.name),
+            defaultValue: arg.defaultValue
+          };
+          
+          Logger.info(`  - ${arg.name}: ${typeName} (${arg.type.kind})`);
+          if (enumValues.length > 0) {
+            Logger.info(`    Enum values: ${enumValues.map(ev => ev.name).join(', ')}`);
+          }
+          if (arg.defaultValue) {
+            Logger.info(`    Default value: ${arg.defaultValue}`);
+          }
         });
         
-        console.log('\n=== Items Return Type Structure ===');
+        Logger.info('=== Items Return Type Structure ===');
         if (itemsField.type.fields) {
           itemsField.type.fields.forEach(field => {
             const typeName = field.type.name || field.type.ofType?.name || field.type.kind;
-            console.log(`  - ${field.name}: ${typeName} (${field.type.kind})`);
+            Logger.info(`  - ${field.name}: ${typeName} (${field.type.kind})`);
           });
         }
+        
+        this.schemaInfo = {
+          itemsField: itemsField,
+          parameters: parameterInfo,
+          discoveredAt: new Date().toISOString()
+        };
+        
+        Logger.info('Schema discovery completed', { parameters: parameterInfo });
+      } else {
+        Logger.warn('Items field not found in schema');
       }
-      
-      this.schemaInfo = {
-        itemsField: itemsField,
-        discoveredAt: new Date().toISOString()
-      };
       
       return this.schemaInfo;
     } catch (error) {
-      console.log('Parameter type discovery failed:', error.message);
+      Logger.error('Schema discovery failed', { error: error.message });
       return null;
     }
   }
 
   async findWorkingQuery() {
+    Logger.step(3, 8, 'Finding working query for recent items');
+    
     if (this.workingQuery) {
+      Logger.info(`Using cached working query: ${this.workingQuery.name}`);
       return this.workingQuery;
     }
 
-    console.log('\nTesting different query approaches for recent items...');
+    // First discover the schema
+    await this.discoverSchema();
     
-    // Discover parameter types first
-    await this.discoverParameterTypes();
-    
-    // Test queries in order of preference - prioritizing recent items
+    // Define test queries based on common patterns and schema discovery
     const queryTests = [
+      // Test common sort values for recent items
       {
-        name: 'RECENT_ITEMS_NEW',
-        query: QUERIES.RECENT_ITEMS,
-        variables: { sort: 'new', limit: CONFIG.SCAN_LIMIT }
+        name: 'SORT_NEW',
+        query: QUERIES.ITEMS_WITH_SORT,
+        variables: { sort: 'new' },
+        description: 'Sort by newest items'
       },
       {
-        name: 'RECENT_ITEMS_RECENT',
-        query: QUERIES.RECENT_ITEMS,
-        variables: { sort: 'recent', limit: CONFIG.SCAN_LIMIT }
+        name: 'SORT_RECENT',
+        query: QUERIES.ITEMS_WITH_SORT,
+        variables: { sort: 'recent' },
+        description: 'Sort by recent items'
       },
       {
-        name: 'RECENT_ITEMS_LATEST', 
-        query: QUERIES.RECENT_ITEMS,
-        variables: { sort: 'latest', limit: CONFIG.SCAN_LIMIT }
+        name: 'SORT_LATEST',
+        query: QUERIES.ITEMS_WITH_SORT,
+        variables: { sort: 'latest' },
+        description: 'Sort by latest items'
       },
       {
-        name: 'RECENT_ITEMS_NO_LIMIT_NEW',
-        query: QUERIES.RECENT_ITEMS_NO_LIMIT,
-        variables: { sort: 'new' }
+        name: 'SORT_TIME',
+        query: QUERIES.ITEMS_WITH_SORT,
+        variables: { sort: 'time' },
+        description: 'Sort by time'
       },
       {
-        name: 'RECENT_ITEMS_NO_LIMIT_RECENT',
-        query: QUERIES.RECENT_ITEMS_NO_LIMIT,
-        variables: { sort: 'recent' }
+        name: 'SORT_CREATED',
+        query: QUERIES.ITEMS_WITH_SORT,
+        variables: { sort: 'created' },
+        description: 'Sort by creation time'
+      },
+      
+      // Test when parameter (time-based filtering)
+      {
+        name: 'WHEN_DAY',
+        query: QUERIES.ITEMS_WITH_WHEN,
+        variables: { when: 'day' },
+        description: 'Items from today'
       },
       {
-        name: 'RECENT_ITEMS_WHEN_DAY',
-        query: QUERIES.RECENT_ITEMS_WHEN,
-        variables: { when: 'day' }
+        name: 'WHEN_ALL',
+        query: QUERIES.ITEMS_WITH_WHEN,
+        variables: { when: 'all' },
+        description: 'All items (no time filter)'
+      },
+      
+      // Test combinations
+      {
+        name: 'SORT_NEW_WHEN_DAY',
+        query: QUERIES.ITEMS_WITH_SORT_AND_WHEN,
+        variables: { sort: 'new', when: 'day' },
+        description: 'New items from today'
       },
       {
-        name: 'RECENT_ITEMS_WHEN_WEEK',
-        query: QUERIES.RECENT_ITEMS_WHEN,
-        variables: { when: 'week' }
+        name: 'SORT_NEW_WITH_LIMIT',
+        query: QUERIES.ITEMS_FULL_PARAMS,
+        variables: { sort: 'new', limit: CONFIG.SCAN_LIMIT },
+        description: 'New items with limit'
+      },
+      
+      // Fallback options
+      {
+        name: 'LIMIT_ONLY',
+        query: QUERIES.ITEMS_WITH_LIMIT,
+        variables: { limit: CONFIG.SCAN_LIMIT },
+        description: 'Items with limit only'
       },
       {
-        name: 'TEST_RECENT_SORT_NEW',
-        query: QUERIES.TEST_ITEMS_RECENT_SORT,
-        variables: { sort: 'new' }
-      },
-      {
-        name: 'TEST_RECENT_SORT_RECENT',
-        query: QUERIES.TEST_ITEMS_RECENT_SORT,
-        variables: { sort: 'recent' }
-      },
-      {
-        name: 'NO_ARGS_FALLBACK',
-        query: QUERIES.TEST_ITEMS_NO_ARGS,
-        variables: {}
+        name: 'NO_PARAMS',
+        query: QUERIES.ITEMS_NO_PARAMS,
+        variables: {},
+        description: 'Items with no parameters (fallback)'
       }
     ];
 
-    for (const test of queryTests) {
+    Logger.info(`Testing ${queryTests.length} query variations...`);
+
+    for (let i = 0; i < queryTests.length; i++) {
+      const test = queryTests[i];
+      Logger.info(`[${i + 1}/${queryTests.length}] Testing ${test.name}: ${test.description}`);
+      
       try {
-        console.log(`Testing ${test.name}...`);
         const response = await this.makeGraphQLRequest(test.query, test.variables);
         
         // Check if we got items back
         if (response && response.items && response.items.items && Array.isArray(response.items.items)) {
-          console.log(`✓ ${test.name} succeeded! Got ${response.items.items.length} items`);
+          const items = response.items.items;
+          Logger.info(`✓ ${test.name} succeeded! Got ${items.length} items`);
           
-          // Show sample item structure and check if items are actually recent
-          if (response.items.items.length > 0) {
-            const sampleItem = response.items.items[0];
-            console.log('Sample item:', JSON.stringify(sampleItem, null, 2));
+          if (items.length > 0) {
+            const sampleItem = items[0];
+            Logger.debug('Sample item structure', sampleItem);
             
-            // Check if items are sorted by creation time (most recent first)
-            if (response.items.items.length > 1) {
-              const firstItemTime = new Date(response.items.items[0].createdAt);
-              const secondItemTime = new Date(response.items.items[1].createdAt);
-              const isRecentFirst = firstItemTime >= secondItemTime;
-              console.log(`Items are sorted by recency: ${isRecentFirst}`);
+            // Analyze item timestamps to determine if they're sorted by recency
+            if (items.length > 1) {
+              const timestamps = items.slice(0, 5).map(item => ({
+                id: item.id,
+                createdAt: item.createdAt,
+                timestamp: new Date(item.createdAt).getTime()
+              }));
               
-              // If this query returns items sorted by recency, prioritize it
-              if (isRecentFirst && test.name.includes('RECENT')) {
-                console.log(`✓ ${test.name} returns items in chronological order - perfect for recent posts!`);
+              Logger.debug('Item timestamps analysis', timestamps);
+              
+              // Check if items are sorted by creation time (newest first)
+              let isRecentFirst = true;
+              for (let j = 1; j < timestamps.length; j++) {
+                if (timestamps[j].timestamp > timestamps[j-1].timestamp) {
+                  isRecentFirst = false;
+                  break;
+                }
+              }
+              
+              Logger.info(`Items sorted by recency (newest first): ${isRecentFirst}`);
+              
+              // Calculate time span
+              const newestTime = Math.max(...timestamps.map(t => t.timestamp));
+              const oldestTime = Math.min(...timestamps.map(t => t.timestamp));
+              const timeSpanMinutes = Math.round((newestTime - oldestTime) / (1000 * 60));
+              
+              Logger.info(`Time span of fetched items: ${timeSpanMinutes} minutes`);
+              
+              // Priority scoring: prefer queries that return items sorted by recency
+              const score = isRecentFirst ? 100 : 50;
+              Logger.info(`Query score: ${score}/100 (higher is better for recent items)`);
+              
+              // If this looks like a good recent items query, use it
+              if (isRecentFirst || test.name.includes('NEW') || test.name.includes('RECENT')) {
+                Logger.info(`✓ Selected ${test.name} as working query`);
+                
+                this.workingQuery = {
+                  name: test.name,
+                  query: test.query,
+                  variables: test.variables,
+                  description: test.description,
+                  isRecentFirst: isRecentFirst,
+                  score: score
+                };
+                
+                return this.workingQuery;
               }
             }
           }
-          
-          this.workingQuery = {
-            name: test.name,
-            query: test.query,
-            variables: test.variables
-          };
-          
-          return this.workingQuery;
         } else {
-          console.log(`✗ ${test.name} returned unexpected structure:`, JSON.stringify(response, null, 2));
+          Logger.warn(`✗ ${test.name} returned unexpected structure`, {
+            responseKeys: Object.keys(response || {}),
+            hasItems: !!(response && response.items),
+            itemsStructure: response && response.items ? Object.keys(response.items) : null
+          });
         }
       } catch (error) {
-        console.log(`✗ ${test.name} failed: ${error.message}`);
+        Logger.warn(`✗ ${test.name} failed: ${error.message}`);
+      }
+      
+      // Rate limiting between tests
+      if (i < queryTests.length - 1) {
+        await this.sleep(500);
       }
     }
 
-    throw new Error('No working query found');
+    throw new Error('No working query found for fetching items');
   }
 
   extractYouTubeId(text) {
     if (!text) return null;
     
-    for (const pattern of YOUTUBE_PATTERNS) {
+    Logger.debug('Extracting YouTube ID from text', { textLength: text.length });
+    
+    for (let i = 0; i < YOUTUBE_PATTERNS.length; i++) {
+      const pattern = YOUTUBE_PATTERNS[i];
       pattern.lastIndex = 0; // Reset regex state
       const match = pattern.exec(text);
       if (match) {
+        Logger.debug(`YouTube ID found with pattern ${i + 1}`, {
+          videoId: match[1],
+          fullMatch: match[0]
+        });
         return match[1];
       }
     }
+    
+    Logger.debug('No YouTube ID found in text');
     return null;
   }
 
   convertToYewTube(originalUrl, videoId) {
-    // Preserve query parameters if present
+    Logger.debug('Converting YouTube URL to yewtu.be', {
+      originalUrl,
+      videoId
+    });
+    
     try {
       const url = new URL(originalUrl);
       const searchParams = new URLSearchParams(url.search);
@@ -467,16 +637,21 @@ class StackerNewsBot {
       // Add timestamp if present
       if (searchParams.has('t')) {
         yewtubeUrl += `&t=${searchParams.get('t')}`;
+        Logger.debug('Added timestamp parameter', { timestamp: searchParams.get('t') });
       }
       
+      Logger.debug('URL conversion successful', { yewtubeUrl });
       return yewtubeUrl;
     } catch (error) {
+      Logger.warn('URL parsing failed, using fallback', { error: error.message });
       // Fallback for malformed URLs
       return `${CONFIG.YEWTU_BE_BASE}/watch?v=${videoId}`;
     }
   }
 
   async authenticateWithNostr() {
+    Logger.step(4, 8, 'Authenticating with Nostr');
+    
     const authEvent = {
       kind: 22242,
       created_at: Math.floor(Date.now() / 1000),
@@ -493,45 +668,85 @@ class StackerNewsBot {
     // Set authorization header
     this.client.setHeader('Authorization', `Nostr ${Buffer.from(JSON.stringify(signedEvent)).toString('base64')}`);
     
+    Logger.info('Nostr authentication completed', {
+      eventId: signedEvent.id,
+      eventKind: signedEvent.kind
+    });
+    
     return signedEvent;
   }
 
   async fetchRecentPosts() {
+    Logger.step(5, 8, 'Fetching recent posts');
+    
     try {
       // Find a working query if we don't have one
       if (!this.workingQuery) {
         await this.findWorkingQuery();
       }
 
-      console.log(`Using query: ${this.workingQuery.name} with variables:`, this.workingQuery.variables);
+      Logger.info(`Using query: ${this.workingQuery.name}`, {
+        query: this.workingQuery.description,
+        variables: this.workingQuery.variables
+      });
+      
       const response = await this.makeGraphQLRequest(this.workingQuery.query, this.workingQuery.variables);
       
       // Extract items
       let items = [];
       if (response && response.items && response.items.items && Array.isArray(response.items.items)) {
-        items = response.items.items;
+        items = response.items.items.filter(item => item && item.id);
       }
 
-      console.log(`Successfully fetched ${items.length} items`);
+      Logger.info(`Successfully fetched ${items.length} items`);
       
-      // Log some timing info to verify we're getting recent items
+      // Detailed analysis for debugging
       if (items.length > 0) {
         const newestItem = items[0];
         const oldestItem = items[items.length - 1];
-        console.log(`Newest item: ${newestItem.createdAt} (ID: ${newestItem.id})`);
-        console.log(`Oldest item: ${oldestItem.createdAt} (ID: ${oldestItem.id})`);
+        const newestTime = new Date(newestItem.createdAt);
+        const oldestTime = new Date(oldestItem.createdAt);
+        const timeDiff = newestTime - oldestTime;
         
-        const timeDiff = new Date(newestItem.createdAt) - new Date(oldestItem.createdAt);
-        console.log(`Time span: ${Math.round(timeDiff / (1000 * 60))} minutes`);
+        Logger.info('Fetched items analysis', {
+          newestItem: {
+            id: newestItem.id,
+            title: newestItem.title?.slice(0, 50) + (newestItem.title?.length > 50 ? '...' : ''),
+            createdAt: newestItem.createdAt,
+            user: newestItem.user?.name
+          },
+          oldestItem: {
+            id: oldestItem.id,
+            title: oldestItem.title?.slice(0, 50) + (oldestItem.title?.length > 50 ? '...' : ''),
+            createdAt: oldestItem.createdAt,
+            user: oldestItem.user?.name
+          },
+          timeSpan: {
+            minutes: Math.round(timeDiff / (1000 * 60)),
+            hours: Math.round(timeDiff / (1000 * 3600)),
+            isRecentFirst: newestTime >= oldestTime
+          }
+        });
+        
+        // Show more recent items for context
+        if (items.length >= 5) {
+          Logger.debug('Recent items sample', items.slice(0, 5).map(item => ({
+            id: item.id,
+            title: item.title?.slice(0, 30) + '...',
+            createdAt: item.createdAt,
+            hasUrl: !!item.url,
+            hasText: !!item.text
+          })));
+        }
       }
       
-      return items.filter(item => item && item.id); // Filter out null/undefined items
+      return items;
     } catch (error) {
-      console.error('Error fetching posts:', error);
+      Logger.error('Error fetching posts', { error: error.message });
       
       // If our working query suddenly fails, reset it
       if (this.workingQuery) {
-        console.log('Working query failed, will try to discover new one next time');
+        Logger.warn('Working query failed, will rediscover next time');
         this.workingQuery = null;
       }
       
@@ -540,6 +755,8 @@ class StackerNewsBot {
   }
 
   async publishNostrNote(title, postId, yewtubeUrl) {
+    Logger.debug('Publishing Nostr note', { title, postId, yewtubeUrl });
+    
     try {
       // Build Stacker.News link
       const stackerLink = `${CONFIG.STACKER_NEWS_BASE}/items/${postId}`;
@@ -569,8 +786,11 @@ class StackerNewsBot {
       // Sign the event
       const signedEvent = finalizeEvent(noteEvent, this.privateKey);
       
-      console.log(`Publishing Nostr note for post ${postId}...`);
-      console.log(`Note content: ${noteContent}`);
+      Logger.info(`Publishing Nostr note for post ${postId}`, {
+        eventId: signedEvent.id,
+        contentLength: noteContent.length,
+        tagCount: signedEvent.tags.length
+      });
       
       // Publish to relays
       const publishPromises = CONFIG.NOSTR_RELAYS.map(relay => 
@@ -583,18 +803,23 @@ class StackerNewsBot {
       const successful = results.filter(r => r.status === 'fulfilled').length;
       const failed = results.filter(r => r.status === 'rejected').length;
       
-      console.log(`Nostr note published to ${successful}/${CONFIG.NOSTR_RELAYS.length} relays (${failed} failed)`);
+      Logger.info(`Nostr note published`, {
+        successful,
+        failed,
+        total: CONFIG.NOSTR_RELAYS.length,
+        successRate: `${Math.round(successful / CONFIG.NOSTR_RELAYS.length * 100)}%`
+      });
       
       if (failed > 0) {
         const failedRelays = results
-          .map((r, i) => r.status === 'rejected' ? CONFIG.NOSTR_RELAYS[i] : null)
+          .map((r, i) => r.status === 'rejected' ? { relay: CONFIG.NOSTR_RELAYS[i], error: r.reason?.message } : null)
           .filter(Boolean);
-        console.log('Failed relays:', failedRelays);
+        Logger.warn('Failed relay publications', failedRelays);
       }
       
       return { successful, failed, total: CONFIG.NOSTR_RELAYS.length };
     } catch (error) {
-      console.error('Error publishing Nostr note:', error);
+      Logger.error('Error publishing Nostr note', { error: error.message, postId });
       throw error;
     }
   }
@@ -609,7 +834,7 @@ class StackerNewsBot {
         const relay = this.nostrPool.ensureRelay(relayUrl);
         
         relay.on('connect', () => {
-          console.log(`Connected to ${relayUrl}`);
+          Logger.debug(`Connected to ${relayUrl}`);
         });
         
         relay.on('error', (error) => {
@@ -622,7 +847,7 @@ class StackerNewsBot {
         
         pub.on('ok', () => {
           clearTimeout(timeoutId);
-          console.log(`✓ Successfully published to ${relayUrl}`);
+          Logger.debug(`✓ Successfully published to ${relayUrl}`);
           resolve(relayUrl);
         });
         
@@ -637,6 +862,7 @@ class StackerNewsBot {
       }
     });
   }
+
 
   async postComment(postId, text) {
     try {
