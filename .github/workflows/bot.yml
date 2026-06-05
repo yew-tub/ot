@@ -65,7 +65,3 @@ jobs:
       with:
         path: .bot-state.json
         key: bot-state-${{ github.run_id }}
-        
-    - name: Print state
-      if: always()
-      run: cat .bot-state.json || echo '(no state file)'
