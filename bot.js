@@ -1114,6 +1114,12 @@ class StackerNewsBot {
       process.exit(1);
     } finally {
       this.isRunning = false;
+      // Close Nostr pool connections so the process can exit cleanly
+      if (this.nostrPool) {
+        try {
+          this.nostrPool.close(CONFIG.NOSTR_RELAYS);
+        } catch (_) {}
+      }
     }
   }
 
