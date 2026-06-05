@@ -69,11 +69,3 @@ jobs:
     - name: Print state
       if: always()
       run: cat .bot-state.json || echo '(no state file)'
-
-    - name: Upload logs
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: bot-logs-${{ github.run_id }}
-        path: .bot-state.json
-        retention-days: 7
