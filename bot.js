@@ -1170,6 +1170,9 @@ async function main() {
     Logger.error('💀 Fatal error occurred', { error: error.message, stack: error.stack });
     process.exit(1);
   }
+  
+  // Force exit — Nostr pool WebSocket connections keep the event loop alive otherwise
+  process.exit(0);
 }
 
 // Run if called directly
