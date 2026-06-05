@@ -75,7 +75,5 @@ jobs:
       if: always()
       with:
         name: bot-logs-${{ github.run_id }}
-        path: |
-          *.log
-          .bot-state.json
+        path: .bot-state.json
         retention-days: 7
