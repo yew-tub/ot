@@ -21,7 +21,7 @@ const CONFIG = {
   COMMENT_TEMPLATE_MULTI: '🔗 Privacy-friendly video links:\n{videoLinks}',
   NOSTR_NOTE_TEMPLATE: '{nprofileLink} posted "{title}"\n\nWatch the {videoLabel} {stackerLink}\n\n#stackernews #watch #privacy #video',
   SCAN_LIMIT: 50,
-  COMMENT_LIMIT: 3,
+  COMMENT_LIMIT: 2,
   COMMENT_DELAY: 21000,
   MAX_CONSECUTIVE_MISSES: 500,
   RATE_LIMIT_DELAY: 2000,
