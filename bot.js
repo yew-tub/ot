@@ -63,7 +63,7 @@ const QUERIES = {
   // Primary items query — returns recent items
   RECENT_ITEMS: `
     query recentItems($limit: Limit!, $cursor: String) {
-      items(limit: $limit, cursor: $cursor) {
+      items(limit: $limit, cursor: $cursor, sort: "new") {
         items {
           id
           title
@@ -980,7 +980,7 @@ class StackerNewsBot {
       
       // Ensure we have a working query before fetching
       // Re-derive if cached query is outdated (missing newer fields)
-      if (!this.workingQuery || (this.workingQuery.name === 'RECENT_ITEMS' && !this.workingQuery.query.includes('nostrAuthPubkey'))) {
+      if (!this.workingQuery || (this.workingQuery.name === 'RECENT_ITEMS' && (!this.workingQuery.query.includes('nostrAuthPubkey') || !this.workingQuery.query.includes('sort: \"new\"')))) {
         this.workingQuery = null;
         await this.findWorkingQuery();
       }
