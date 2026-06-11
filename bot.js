@@ -6,10 +6,9 @@
  * Enhanced with detailed debugging and proper recent items fetching
  */
 
-const { getPublicKey, finalizeEvent, verifyEvent, nip19, SimplePool } = require('nostr-tools');
+const { getPublicKey, finalizeEvent, nip19, SimplePool } = require('nostr-tools');
 const { GraphQLClient } = require('graphql-request');
 const fs = require('fs').promises;
-const path = require('path');
 const WebSocket = require('ws');
 global.WebSocket = WebSocket;
 
@@ -26,7 +25,6 @@ const CONFIG = {
   MAX_CONSECUTIVE_MISSES: 500,
   MIN_STACKED_VALUE: 123,
   RATE_LIMIT_DELAY: 2000,
-  MIN_POST_VALUE: 123,
   STATE_FILE: './.bot-state.json',
   DEBUG: process.env.DEBUG === 'true' || process.env.NODE_ENV !== 'production',
   BACKFILL_ENABLED: process.env.BACKFILL !== 'false',
@@ -349,28 +347,6 @@ class StackerNewsBot {
     throw new Error('No working query found for fetching recent items');
   }
 
-  extractYouTubeId(text) {
-    if (!text) return null;
-    
-    Logger.debug('Extracting YouTube ID from text', { textLength: text.length });
-    
-    for (let i = 0; i < YOUTUBE_PATTERNS.length; i++) {
-      const pattern = YOUTUBE_PATTERNS[i];
-      pattern.lastIndex = 0;
-      const match = pattern.exec(text);
-      if (match) {
-        Logger.debug(`YouTube ID found with pattern ${i + 1}`, {
-          videoId: match[1],
-          fullMatch: match[0]
-        });
-        return match[1];
-      }
-    }
-    
-    Logger.debug('No YouTube ID found in text');
-    return null;
-  }
-
   extractAllYouTubeIds(text) {
     if (!text) return [];
 
@@ -576,139 +552,6 @@ class StackerNewsBot {
       Logger.error('❌ Authentication failed', { error: error.message });
       throw error;
     }
-  }
-
-  async fetchRecentPosts() {
-    Logger.step(4, 7, 'Fetching recent posts');
-    
-    try {
-      // Find a working query if we don't have one
-      if (!this.workingQuery) {
-        await this.findWorkingQuery();
-      }
-
-      Logger.info(`Using query: ${this.workingQuery.name}`, {
-        query: this.workingQuery.description,
-        variables: this.workingQuery.variables
-      });
-      
-      const response = await this.makeGraphQLRequest(this.workingQuery.query, this.workingQuery.variables);
-      
-      // Extract items
-      let items = [];
-      if (response && response.items && response.items.items && Array.isArray(response.items.items)) {
-        items = response.items.items.filter(item => item && item.id);
-        
-        // CRITICAL FIX: Sort by createdAt descending to ensure newest first
-        items.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      }
-
-      Logger.info(`Successfully fetched ${items.length} items`);
-      
-      // Detailed analysis for debugging
-      if (items.length > 0) {
-        const newestItem = items[0];
-        const oldestItem = items[items.length - 1];
-        const newestTime = new Date(newestItem.createdAt);
-        const oldestTime = new Date(oldestItem.createdAt);
-        const timeDiff = newestTime - oldestTime;
-        const minutesAgo = Math.round((Date.now() - newestTime.getTime()) / (1000 * 60));
-        
-        Logger.info('Fetched items analysis', {
-          newestItem: {
-            id: newestItem.id,
-            title: newestItem.title?.slice(0, 50) + (newestItem.title?.length > 50 ? '...' : ''),
-            createdAt: newestItem.createdAt,
-            user: newestItem.user?.name,
-            minutesAgo: minutesAgo
-          },
-          oldestItem: {
-            id: oldestItem.id,
-            title: oldestItem.title?.slice(0, 50) + (oldestItem.title?.length > 50 ? '...' : ''),
-            createdAt: oldestItem.createdAt,
-            user: oldestItem.user?.name
-          },
-          timeSpan: {
-            minutes: Math.round(timeDiff / (1000 * 60)),
-            hours: Math.round(timeDiff / (1000 * 3600)),
-            isNewestFirst: newestTime >= oldestTime,
-            freshness: minutesAgo < 60 ? 'very fresh' : minutesAgo < 720 ? 'recent' : 'older'
-          }
-        });
-        
-        // Warning if data seems stale
-        if (minutesAgo > 120) { // 2 hours
-          Logger.warn(`⚠️  Newest item is ${minutesAgo} minutes old - may not be getting truly recent items`);
-        }
-        
-        // Show recent items sample for debugging
-        if (items.length >= 5) {
-          Logger.debug('Recent items sample (newest first)', items.slice(0, 5).map(item => ({
-            id: item.id,
-            title: item.title?.slice(0, 30) + '...',
-            createdAt: item.createdAt,
-            minutesAgo: Math.round((Date.now() - new Date(item.createdAt).getTime()) / (1000 * 60)),
-            hasUrl: !!item.url,
-            hasText: !!item.text
-          })));
-        }
-      }
-      
-      return items;
-    } catch (error) {
-      Logger.error('Error fetching posts', { error: error.message });
-      
-      // If our working query suddenly fails, reset it
-      if (this.workingQuery) {
-        Logger.warn('Working query failed, will rediscover next time');
-        this.workingQuery = null;
-      }
-      
-      return [];
-    }
-  }
-
-  async fetchAllPosts(maxItems) {
-    Logger.info(`Backfill: fetching up to ${maxItems} items via cursor pagination`);
-
-    if (!this.workingQuery) {
-      await this.findWorkingQuery();
-    }
-
-    const allItems = [];
-    let cursor = null;
-    let pages = 0;
-
-    while (allItems.length < maxItems) {
-      const remaining = maxItems - allItems.length;
-      const limit = Math.min(CONFIG.SCAN_LIMIT, remaining);
-      const vars = { limit, ...(cursor ? { cursor } : {}) };
-
-      try {
-        const response = await this.makeGraphQLRequest(this.workingQuery.query, vars);
-        const items = response?.items?.items?.filter(item => item && item.id) || [];
-        if (items.length === 0) break;
-
-        allItems.push(...items);
-        pages++;
-        cursor = response.items.cursor;
-
-        Logger.info(`Backfill page ${pages}: got ${items.length} items (total: ${allItems.length}/${maxItems})`);
-
-        if (!cursor) {
-          Logger.info('Backfill: no more cursor, reached end');
-          break;
-        }
-
-        await this.sleep(CONFIG.RATE_LIMIT_DELAY);
-      } catch (error) {
-        Logger.error('Backfill page fetch failed', { error: error.message, page: pages });
-        break;
-      }
-    }
-
-    Logger.info(`Backfill complete: ${allItems.length} items across ${pages} pages`);
-    return allItems;
   }
 
   async publishNostrNote(title, postId, invidiousUrl, username, userHexPubkey, videoCount = 1, commentId) {
