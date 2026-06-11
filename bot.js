@@ -697,7 +697,6 @@ class StackerNewsBot {
     
     if (allVideos.length === 0) {
       Logger.debug(`No YouTube links found in post ${post.id}`);
-      this.processedPosts.add(post.id);
       return false;
     }
 
@@ -747,7 +746,6 @@ class StackerNewsBot {
       const cost = post.commentCost || 0;
       if (cost > this.creditBalance) {
         Logger.info(`⏭️  Skipping post ${post.id}: comment costs ${cost} mcredits but balance is ${this.creditBalance}`);
-        this.processedPosts.add(post.id);
         return false;
       }
       if (cost > 0) {
@@ -758,7 +756,6 @@ class StackerNewsBot {
       const stackedValue = (post.sats || 0) + (post.credits || 0) - (post.boost || 0) - cost;
       if (stackedValue < CONFIG.MIN_STACKED_VALUE) {
         Logger.info(`⏭️  Skipping post ${post.id}: stacked value ${stackedValue} is below minimum ${CONFIG.MIN_STACKED_VALUE} (sats=${post.sats || 0}, credits=${post.credits || 0}, boost=${post.boost || 0}, cost=${cost})`);
-        this.processedPosts.add(post.id);
         return false;
       }
       Logger.info(`📊 Stacked value ${stackedValue} meets minimum threshold of ${CONFIG.MIN_STACKED_VALUE}`);
@@ -852,12 +849,9 @@ class StackerNewsBot {
       }
       Logger.info(`💰 Sufficient mcredits (${this.creditBalance}), proceeding with scan`);
       
-      // Live mode: scan only recent posts (2 pages). Backfill mode: scan up to BACKFILL_DEPTH pages.
-      const maxPages = CONFIG.BACKFILL_ENABLED ? CONFIG.BACKFILL_DEPTH : 2;
-      Logger.step(4, 7, `${CONFIG.BACKFILL_ENABLED ? 'Backfill' : 'Live'} mode: scanning up to ${maxPages} pages (${maxPages * CONFIG.SCAN_LIMIT} posts max)`);
+      Logger.step(4, 7, 'Scanning posts newest-first for YouTube links with ≥ 123 stacked value');
       
       let cursor = null;
-      let pages = 0;
       let consecutiveMisses = 0;
       let totalFetched = 0;
       let processedCount = 0;
@@ -880,10 +874,9 @@ class StackerNewsBot {
         }
         
         cursor = response.items.cursor;
-        pages++;
         totalFetched += posts.length;
         
-        Logger.info(`📄 Page ${pages}/${maxPages}: ${posts.length} posts (total fetched: ${totalFetched}, comments: ${commentedCount}/${CONFIG.COMMENT_LIMIT})`);
+        Logger.info(`📄 Page: ${posts.length} posts (total fetched: ${totalFetched}, comments: ${commentedCount}/${CONFIG.COMMENT_LIMIT})`);
         
         for (const post of posts) {
           processedCount++;
@@ -908,12 +901,7 @@ class StackerNewsBot {
         }
         
         if (commentedCount >= CONFIG.COMMENT_LIMIT) break;
-        
-        if (pages >= maxPages) {
-          Logger.info(`⏹️  Reached max scan depth (${maxPages} pages)`);
-          break;
-        }
-        
+
         if (!cursor) {
           Logger.info('No more cursor pages, reached end of available posts');
           break;
@@ -954,10 +942,10 @@ class StackerNewsBot {
       // Performance insights
       if (youtubeLinksFound === 0 && processedCount > 0) {
         Logger.warn('⚠️  No YouTube links found in any posts. This might indicate:');
-        Logger.warn('   - Posts are too old (YouTube content might be in newer posts)');
-        Logger.warn('   - Query is not fetching recent items correctly');
-        Logger.warn('   - YouTube content is rare in the current time period');
-        Logger.info('💡 Consider checking if the working query is fetching recent posts correctly');
+        Logger.warn('   - YouTube content is currently rare in the /new feed');
+        Logger.warn('   - The working query/API may have changed');
+        Logger.warn('   - All YouTube posts found had insufficient stacked value (< 123)');
+        Logger.info('💡 Consider checking if the working query is still fetching posts correctly');
       }
       
       if (commentedCount > 0) {
