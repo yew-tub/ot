@@ -21,10 +21,12 @@ const CONFIG = {
   COMMENT_TEMPLATE_MULTI: '🔗 Privacy-friendly video links:\n{videoLinks}',
   NOSTR_NOTE_TEMPLATE: '{nprofileLink} posted "{title}"\n\nWatch the {videoLabel} {stackerLink}\n\n#stackernews #watch #privacy #video',
   SCAN_LIMIT: 50,
-  COMMENT_LIMIT: 2,
+  COMMENT_LIMIT: 3,
   COMMENT_DELAY: 21000,
   MAX_CONSECUTIVE_MISSES: 500,
+  MIN_STACKED_VALUE: 123,
   RATE_LIMIT_DELAY: 2000,
+  MIN_POST_VALUE: 123,
   STATE_FILE: './.bot-state.json',
   DEBUG: process.env.DEBUG === 'true' || process.env.NODE_ENV !== 'production',
   BACKFILL_ENABLED: process.env.BACKFILL !== 'false',
@@ -72,6 +74,7 @@ const QUERIES = {
           createdAt
           updatedAt
           sats
+          credits
           boost
           ncomments
           commentCost
@@ -907,6 +910,15 @@ class StackerNewsBot {
       if (cost > 0) {
         Logger.info(`💸 Comment will cost ${cost} mcredit(s) (balance: ${this.creditBalance})`);
       }
+
+      // Check stacked value: sats + credits - boost - commentCost must be >= MIN_STACKED_VALUE
+      const stackedValue = (post.sats || 0) + (post.credits || 0) - (post.boost || 0) - cost;
+      if (stackedValue < CONFIG.MIN_STACKED_VALUE) {
+        Logger.info(`⏭️  Skipping post ${post.id}: stacked value ${stackedValue} is below minimum ${CONFIG.MIN_STACKED_VALUE} (sats=${post.sats || 0}, credits=${post.credits || 0}, boost=${post.boost || 0}, cost=${cost})`);
+        this.processedPosts.add(post.id);
+        return false;
+      }
+      Logger.info(`📊 Stacked value ${stackedValue} meets minimum threshold of ${CONFIG.MIN_STACKED_VALUE}`);
 
       // Post comment on Stacker.News
       Logger.info(`💬 Posting comment on post ${post.id}...`);
