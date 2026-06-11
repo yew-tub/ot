@@ -32,12 +32,10 @@ const CONFIG = {
   INVIDIOUS_INSTANCES: (process.env.INVIDIOUS_INSTANCES || [
     'https://yewtu.be',
     'https://inv.nadeko.net',
-    'https://vid.puffyan.us',
-    'https://invidious.weblibre.org',
     'https://invidious.projectsegfau.lt',
-    'https://invidious.privacydev.net',
-    'https://invidious.slipfox.xyz',
-    'https://y.zuut.xyz'
+    'https://invidious.nerdvpn.de',
+    'https://invidious.f5.si',
+    'https://inv.thepixora.com'
   ].join(',')).split(',').map(s => s.trim()).filter(Boolean),
   NOSTR_RELAYS: [
     'wss://relay.stacker.news',
@@ -383,9 +381,33 @@ class StackerNewsBot {
     }
   }
 
+  async refreshWorkingInstances() {
+    Logger.step(3, 7, 'Checking Invidious instances');
+    const working = [];
+    for (const url of CONFIG.INVIDIOUS_INSTANCES) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const res = await fetch(`${url}/api/v1/stats`, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (res.ok) {
+          working.push(url);
+        }
+      } catch {
+        // instance unreachable, skip
+      }
+    }
+    this.workingInvidiousInstances = working.length > 0 ? working : CONFIG.INVIDIOUS_INSTANCES;
+    Logger.info(`📡 Invidious: ${this.workingInvidiousInstances.length}/${CONFIG.INVIDIOUS_INSTANCES.length} instances responsive`);
+    if (working.length === 0) {
+      Logger.warn('⚠️  No Invidious instances responded — will try all anyway');
+    }
+  }
+
   pickInvidiousInstance() {
-    const instances = CONFIG.INVIDIOUS_INSTANCES;
-    return instances[Math.floor(Math.random() * instances.length)];
+    const list = this.workingInvidiousInstances || CONFIG.INVIDIOUS_INSTANCES;
+    if (list.length === 0) return CONFIG.INVIDIOUS_INSTANCES[0];
+    return list[Math.floor(Math.random() * list.length)];
   }
 
   convertToInvidious(originalUrl, videoId) {
@@ -849,6 +871,9 @@ class StackerNewsBot {
         return;
       }
       Logger.info(`💰 Sufficient mcredits (${this.creditBalance}), proceeding with scan`);
+      
+      // Check which Invidious instances are responsive
+      await this.refreshWorkingInstances();
       
       Logger.step(4, 7, 'Scanning posts newest-first for YouTube links with ≥ 123 stacked value');
       
