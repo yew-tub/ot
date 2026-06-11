@@ -1,211 +1,1027 @@
-// Test utilities that don't require a full bot instance
-const { getPublicKey } = require('nostr-tools');
+#!/usr/bin/env node
 
-// Mock data for testing
-const mockPosts = [
-  {
-    id: "1",
-    title: "Check out this video",
-    text: "Amazing content: https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    url: null,
-    createdAt: new Date().toISOString(),
-    user: { name: "testuser" }
-  },
-  {
-    id: "2",
-    title: "Another post",
-    text: "Short link: https://youtu.be/dQw4w9WgXcQ",
-    url: null,
-    createdAt: new Date().toISOString(),
-    user: { name: "testuser2" }
-  },
-  {
-    id: "3",
-    title: "No YouTube link",
-    text: "Just a regular post about bitcoin",
-    url: null,
-    createdAt: new Date().toISOString(),
-    user: { name: "testuser3" }
-  }
-];
+/**
+ * Stacker.News YouTube Link Bot
+ * Monitors for YouTube links and posts yewtu.be alternatives
+ * Enhanced with detailed debugging and proper recent items fetching
+ */
 
-// Configuration (copied from bot.js)
+const { getPublicKey, finalizeEvent, nip19, SimplePool } = require('nostr-tools');
+const { GraphQLClient } = require('graphql-request');
+const fs = require('fs').promises;
+const WebSocket = require('ws');
+global.WebSocket = WebSocket;
+
+// Configuration
 const CONFIG = {
-  INVIDIOUS_INSTANCES: ['https://yewtu.be'],
-  COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}'
+  STACKER_NEWS_API: 'https://stacker.news/api/graphql',
+  STACKER_NEWS_BASE: 'https://stacker.news',
+  COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}',
+  COMMENT_TEMPLATE_MULTI: '🔗 Privacy-friendly video links:\n{videoLinks}',
+  NOSTR_NOTE_TEMPLATE: '{nprofileLink} posted "{title}"\n\nWatch the {videoLabel} {stackerLink}\n\n#stackernews #watch #privacy #video',
+  SCAN_LIMIT: 50,
+  COMMENT_LIMIT: 3,
+  COMMENT_DELAY: 21000,
+  MAX_CONSECUTIVE_MISSES: 500,
+  MIN_STACKED_VALUE: 123,
+  RATE_LIMIT_DELAY: 2000,
+  STATE_FILE: './.bot-state.json',
+  DEBUG: process.env.DEBUG === 'true' || process.env.NODE_ENV !== 'production',
+  BACKFILL_ENABLED: process.env.BACKFILL !== 'false',
+  BACKFILL_DEPTH: parseInt(process.env.BACKFILL_DEPTH || '21', 10),
+  INVIDIOUS_INSTANCES: (process.env.INVIDIOUS_INSTANCES || [
+    'https://yewtu.be',
+    'https://inv.nadeko.net',
+    'https://vid.puffyan.us',
+    'https://invidious.weblibre.org',
+    'https://invidious.projectsegfau.lt',
+    'https://invidious.privacydev.net',
+    'https://invidious.slipfox.xyz',
+    'https://y.zuut.xyz'
+  ].join(',')).split(',').map(s => s.trim()).filter(Boolean),
+  NOSTR_RELAYS: [
+    'wss://relay.stacker.news',
+    'wss://relay.damus.io',
+    'wss://nos.lol',
+    'wss://relay.nostr.band',
+    'wss://nostr.wine'
+  ]
 };
 
-// YouTube URL patterns (copied from bot.js)
+// YouTube URL patterns
 const YOUTUBE_PATTERNS = [
   /(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/gi,
   /(?:https?:\/\/)?(?:www\.)?youtu\.be\/([a-zA-Z0-9_-]{11})/gi,
   /(?:https?:\/\/)?(?:www\.)?youtube\.com\/embed\/([a-zA-Z0-9_-]{11})/gi,
   /(?:https?:\/\/)?(?:www\.)?youtube\.com\/v\/([a-zA-Z0-9_-]{11})/gi,
-  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi
+  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/gi,
+  /(?:https?:\/\/)?(?:www\.)?youtube\.com\/live\/([a-zA-Z0-9_-]{11})/gi
 ];
 
-// Test functions that don't require bot instance
-function extractYouTubeId(text) {
-  if (!text) return null;
-  
-  for (const pattern of YOUTUBE_PATTERNS) {
-    pattern.lastIndex = 0; // Reset regex state
-    const match = pattern.exec(text);
-    if (match) {
-      return match[1];
+// GraphQL queries — SN uses custom types like Limit! (not Int) for limit args
+const BOT_USERNAME = 'YewTuBot';
+const QUERIES = {
+  // Primary items query — returns recent items
+  RECENT_ITEMS: `
+    query recentItems($limit: Limit!, $cursor: String) {
+      items(limit: $limit, cursor: $cursor, sort: "new") {
+        items {
+          id
+          title
+          text
+          url
+          createdAt
+          updatedAt
+          sats
+          credits
+          boost
+          ncomments
+          commentCost
+          user { name id optional { nostrAuthPubkey } }
+          sub { name }
+          comments {
+            comments {
+              id
+              user { name }
+            }
+          }
+        }
+        cursor
+      }
     }
-  }
-  return null;
-}
+  `,
 
-function pickInvidiousInstance() {
-  return CONFIG.INVIDIOUS_INSTANCES[Math.floor(Math.random() * CONFIG.INVIDIOUS_INSTANCES.length)];
-}
-
-function convertToInvidious(originalUrl, videoId) {
-  const url = new URL(originalUrl);
-  const searchParams = new URLSearchParams(url.search);
-  const instance = pickInvidiousInstance();
-  
-  let invidiousUrl = `${instance}/watch?v=${videoId}`;
-  if (searchParams.has('t')) {
-    invidiousUrl += `&t=${searchParams.get('t')}`;
-  }
-  
-  return invidiousUrl;
-}
-
-async function testBot() {
-  console.log('Testing YouTube link detection...');
-  
-  // Test YouTube ID extraction
-  const testCases = [
-    'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-    'https://youtu.be/dQw4w9WgXcQ',
-    'https://youtube.com/embed/dQw4w9WgXcQ',
-    'https://youtube.com/v/dQw4w9WgXcQ',
-    'https://youtube.com/shorts/dQw4w9WgXcQ',
-    'Check out this video: https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s',
-    'No YouTube link here'
-  ];
-  
-  console.log('\n=== Testing YouTube ID Extraction ===');
-  testCases.forEach(url => {
-    const videoId = extractYouTubeId(url);
-    console.log(`Input: ${url}`);
-    console.log(`Video ID: ${videoId || 'None'}`);
-    console.log('---');
-  });
-  
-  // Test URL conversion
-  console.log('\n=== Testing URL Conversion ===');
-  const youtubeUrls = [
-    'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-    'https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s',
-    'https://youtu.be/dQw4w9WgXcQ'
-  ];
-  
-  youtubeUrls.forEach(url => {
-    const videoId = extractYouTubeId(url);
-    if (videoId) {
-      const invidiousUrl = convertToInvidious(url, videoId);
-      console.log(`Original: ${url}`);
-      console.log(`Invidious: ${invidiousUrl}`);
-      console.log('---');
-    }
-  });
-  
-  // Test comment template
-  console.log('\n=== Testing Comment Template ===');
-  const sampleUrl = 'https://yewtu.be/watch?v=dQw4w9WgXcQ';
-  const commentText = CONFIG.COMMENT_TEMPLATE.replace('{link}', sampleUrl);
-  console.log('Generated comment:');
-  console.log(commentText);
-  
-  // Test with mock posts
-  console.log('\n=== Testing with Mock Posts ===');
-  mockPosts.forEach(post => {
-    const content = `${post.title || ''} ${post.text || ''} ${post.url || ''}`;
-    const videoId = extractYouTubeId(content);
-    console.log(`Post ID: ${post.id}`);
-    console.log(`Content: ${content.trim()}`);
-    console.log(`YouTube detected: ${videoId ? 'Yes (' + videoId + ')' : 'No'}`);
-    
-    if (videoId) {
-      // Find the original URL for conversion
-      for (const pattern of YOUTUBE_PATTERNS) {
-        pattern.lastIndex = 0;
-        const match = pattern.exec(content);
-        if (match) {
-          const originalUrl = match[0];
-          const invidiousUrl = convertToInvidious(originalUrl, videoId);
-          console.log(`Would post: ${invidiousUrl}`);
-          break;
+  // Wallet balance query
+  ME_WALLET: `
+    {
+      me {
+        id
+        name
+        privates {
+          credits
+          sats
         }
       }
     }
-    console.log('---');
-  });
-  
-  console.log('\n=== Testing Complete ===');
-  console.log('✅ If you see video IDs extracted correctly and Invidious URLs generated, the bot logic is working!');
-  console.log('💡 To test with real API calls, set NOSTR_PRIVATE_KEY and run: node test.js --api');
+  `,
+
+  // Comment mutation — uses parentId to create a new comment on a post
+  POST_COMMENT: `
+    mutation upsertComment($parentId: ID!, $text: String!) {
+      upsertComment(parentId: $parentId, text: $text) {
+        id
+      }
+    }
+  `
+};
+
+// Debug logging utility
+class Logger {
+  static log(level, message, data = null) {
+    const timestamp = new Date().toISOString();
+    const prefix = `[${timestamp}] [${level.toUpperCase()}]`;
+    
+    console.log(`${prefix} ${message}`);
+    if (data && CONFIG.DEBUG) {
+      console.log(`${prefix} Data:`, JSON.stringify(data, null, 2));
+    }
+  }
+
+  static debug(message, data = null) {
+    if (CONFIG.DEBUG) {
+      this.log('DEBUG', message, data);
+    }
+  }
+
+  static info(message, data = null) {
+    this.log('INFO', message, data);
+  }
+
+  static warn(message, data = null) {
+    this.log('WARN', message, data);
+  }
+
+  static error(message, data = null) {
+    this.log('ERROR', message, data);
+  }
+
+  static step(stepNumber, totalSteps, description) {
+    this.info(`[STEP ${stepNumber}/${totalSteps}] ${description}`);
+  }
 }
 
-// Advanced testing with API calls (requires NOSTR_PRIVATE_KEY)
-async function testWithAPI() {
-  const secret = process.env.NOSTR_PRIVATE_KEY;
-  if (!secret) {
-    console.log('⚠️  NOSTR_PRIVATE_KEY not set. Skipping API tests.');
-    console.log('💡 Set NOSTR_PRIVATE_KEY environment variable to test API calls.');
-    console.log('   Example: export NOSTR_PRIVATE_KEY="nsec1..."');
-    return;
-  }
-  
-  console.log('\n=== Testing API Integration ===');
-  
+// Helper function to convert nsec1 to hex
+function nsecToHex(nsecKey) {
   try {
-    // Import the bot class only when we need it
-    const StackerNewsBot = require('./bot');
-    const bot = new StackerNewsBot();
+    const decoded = nip19.decode(nsecKey);
+    if (decoded.type === 'nsec') {
+      return decoded.data;
+    } else {
+      throw new Error('Invalid nsec key type');
+    }
+  } catch (error) {
+    throw new Error(`Failed to decode nsec key: ${error.message}`);
+  }
+}
+
+// Extract name=value pairs from Set-Cookie headers
+function extractSetCookieHeaders(headers) {
+  if (typeof headers.getSetCookie === 'function') {
+    return headers.getSetCookie().map(c => c.split(';')[0]).join('; ');
+  }
+  const val = headers.get('set-cookie');
+  return val ? val.split(',').map(c => c.split(';')[0]).join('; ') : '';
+}
+
+// Create NIP-98 Authorization header value
+function createNip98AuthHeader(signedEvent) {
+  return `Nostr ${Buffer.from(JSON.stringify(signedEvent)).toString('base64')}`;
+}
+
+// Sign a NIP-98 event for a given URL + method
+function signNip98Event(url, method, sk, pk) {
+  const event = {
+    kind: 27235,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [['u', url], ['method', method]],
+    content: '',
+    pubkey: pk
+  };
+  return finalizeEvent(event, sk);
+}
+
+// Filter out cookies that would interfere with auth (e.g. signin)
+function sanitizeCookies(cookieStr) {
+  if (!cookieStr) return '';
+  return cookieStr.split('; ').filter(c => {
+    const name = c.split('=')[0];
+    return !['signin'].includes(name);
+  }).join('; ');
+}
+
+class StackerNewsBot {
+  constructor() {
+    Logger.info('Initializing StackerNewsBot...');
+    Logger.debug('Configuration', CONFIG);
     
-    // Test authentication
-    console.log('Testing Nostr authentication...');
-    await bot.authenticateWithNostr();
-    console.log('✅ Authentication successful');
+    this.privateKey = this.getPrivateKey();
+    this.publicKey = getPublicKey(this.privateKey);
+    this.client = new GraphQLClient(CONFIG.STACKER_NEWS_API);
+    this.nostrPool = new SimplePool();
+    this.processedPosts = new Set();
+    this.commentedPosts = new Set();
+    this.isRunning = false;
+    this.workingQuery = null;
+    this.sessionCookies = null;
+    this.creditBalance = 0;
     
-    // Test fetching posts (read-only)
-    console.log('Testing post fetching...');
-    const posts = await bot.fetchRecentPosts();
-    console.log(`✅ Fetched ${posts.length} posts`);
+    Logger.info('Bot initialized successfully', {
+      publicKey: this.publicKey,
+      apiEndpoint: CONFIG.STACKER_NEWS_API
+    });
+  }
+
+  getPrivateKey() {
+    Logger.debug('Getting private key from environment...');
+    let privateKey = process.env.NOSTR_PRIVATE_KEY;
     
-    // Show first few posts (without processing)
-    console.log('\nFirst 3 posts:');
-    posts.slice(0, 3).forEach((post, index) => {
-      console.log(`${index + 1}. ${post.title || 'No title'} (ID: ${post.id})`);
-      const videoId = extractYouTubeId(`${post.title || ''} ${post.text || ''} ${post.url || ''}`);
-      console.log(`   YouTube detected: ${videoId ? 'Yes (' + videoId + ')' : 'No'}`);
+    if (!privateKey) {
+      throw new Error('NOSTR_PRIVATE_KEY environment variable is required');
+    }
+    
+    // Convert nsec1 to hex if needed
+    if (privateKey.startsWith('nsec1')) {
+      Logger.info('Converting nsec1 private key to hex format...');
+      privateKey = nsecToHex(privateKey);
+      Logger.debug('Private key converted successfully');
+    }
+    
+    return privateKey;
+  }
+
+  async loadState() {
+    Logger.step(1, 7, 'Loading bot state');
+    try {
+      const stateData = await fs.readFile(CONFIG.STATE_FILE, 'utf8');
+      const state = JSON.parse(stateData);
+      this.processedPosts = new Set(state.processedPosts || []);
+      this.commentedPosts = new Set(state.commentedPosts || []);
+      this.workingQuery = state.workingQuery || null;
+
+      if (process.env.RESCAN === 'true') {
+        const wasProcessed = this.processedPosts.size;
+        const wasCommented = this.commentedPosts.size;
+        this.processedPosts.clear();
+        this.commentedPosts.clear();
+        Logger.info(`🧹 RESCAN=true — cleared state (was ${wasProcessed} processed, ${wasCommented} commented)`);
+      }
+      
+      Logger.info(`State loaded successfully`, {
+        processedPostsCount: this.processedPosts.size,
+        commentedPostsCount: this.commentedPosts.size,
+        hasWorkingQuery: !!this.workingQuery,
+        workingQuery: this.workingQuery?.name || 'none'
+      });
+    } catch (error) {
+      Logger.info('No previous state found, starting fresh');
+    }
+  }
+
+  async saveState() {
+    Logger.debug('Saving bot state...');
+    const state = {
+      processedPosts: Array.from(this.processedPosts),
+      commentedPosts: Array.from(this.commentedPosts),
+      workingQuery: this.workingQuery,
+      lastRun: new Date().toISOString()
+    };
+    
+    await fs.writeFile(CONFIG.STATE_FILE, JSON.stringify(state, null, 2));
+    Logger.info('State saved successfully', {
+      processedPostsCount: this.processedPosts.size,
+      commentedPostsCount: this.commentedPosts.size,
+      lastRun: state.lastRun
+    });
+  }
+
+  async makeGraphQLRequest(query, variables = {}) {
+    Logger.debug('Making GraphQL request', {
+      queryPreview: query.slice(0, 100) + '...',
+      variables
     });
     
-    console.log('\n✅ API integration test complete!');
+    try {
+      const response = await this.client.request(query, variables);
+      Logger.debug('GraphQL request successful', {
+        responseKeys: Object.keys(response || {}),
+        responseSize: JSON.stringify(response || {}).length
+      });
+      return response;
+    } catch (error) {
+      Logger.error(`GraphQL request failed: ${error.message}`, {
+        error: {
+          message: error.message,
+          response: error.response?.errors,
+          status: error.response?.status
+        },
+        request: {
+          queryPreview: query.slice(0, 200) + '...',
+          variables
+        }
+      });
+      throw error;
+    }
+  }
+
+  async findWorkingQuery() {
+    Logger.step(2, 7, 'Finding working query for recent items');
+
+    if (this.workingQuery) {
+      Logger.info(`Using cached working query: ${this.workingQuery.name}`);
+      return this.workingQuery;
+    }
+
+    // SN uses Limit! custom type, not Int — try one direct query
+    Logger.info('Testing RECENT_ITEMS query...');
+    try {
+      const response = await this.makeGraphQLRequest(QUERIES.RECENT_ITEMS, {
+        limit: CONFIG.SCAN_LIMIT
+      });
+
+      if (response?.items?.items?.length) {
+        const items = response.items.items;
+        Logger.info(`✓ RECENT_ITEMS works — got ${items.length} items`);
+
+        this.workingQuery = {
+          name: 'RECENT_ITEMS',
+          query: QUERIES.RECENT_ITEMS,
+          variables: { limit: CONFIG.SCAN_LIMIT },
+          description: 'Default items query with Limit! type'
+        };
+
+        return this.workingQuery;
+      }
+    } catch (error) {
+      Logger.error(`RECENT_ITEMS query failed`, { error: error.message });
+    }
+
+    throw new Error('No working query found for fetching recent items');
+  }
+
+  extractAllYouTubeIds(text) {
+    if (!text) return [];
+
+    Logger.debug('Extracting all YouTube IDs from text', { textLength: text.length });
+
+    const results = [];
+    for (let i = 0; i < YOUTUBE_PATTERNS.length; i++) {
+      const pattern = new RegExp(YOUTUBE_PATTERNS[i].source, 'gi');
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        const videoId = match[1];
+        let url = match[0];
+        if (!url.startsWith('http')) {
+          url = 'https://' + url;
+        }
+        if (!results.some(r => r.id === videoId)) {
+          results.push({ id: videoId, url });
+        }
+      }
+    }
+
+    Logger.debug('YouTube links found', { count: results.length });
+    return results;
+  }
+
+  async fetchVideoTitle(videoId) {
+    try {
+      const res = await fetch(`https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`);
+      const data = await res.json();
+      return data?.title || null;
+    } catch {
+      return null;
+    }
+  }
+
+  pickInvidiousInstance() {
+    const instances = CONFIG.INVIDIOUS_INSTANCES;
+    return instances[Math.floor(Math.random() * instances.length)];
+  }
+
+  convertToInvidious(originalUrl, videoId) {
+    Logger.debug('Converting YouTube URL to Invidious instance', {
+      originalUrl,
+      videoId
+    });
+
+    try {
+      const url = new URL(originalUrl);
+      const searchParams = new URLSearchParams(url.search);
+      const instance = this.pickInvidiousInstance();
+
+      let invidiousUrl = `${instance}/watch?v=${videoId}`;
+      if (searchParams.has('t')) {
+        invidiousUrl += `&t=${searchParams.get('t')}`;
+      }
+
+      Logger.debug('URL conversion successful', { invidiousUrl, instance });
+      return invidiousUrl;
+    } catch (error) {
+      Logger.warn('URL parsing failed, using fallback', { error: error.message });
+      return `${CONFIG.INVIDIOUS_INSTANCES[0]}/watch?v=${videoId}`;
+    }
+  }
+
+  async authenticateWithNostr() {
+    Logger.step(3, 7, 'Authenticating with Stacker.News via Nostr');
+
+    try {
+      // Use pre-authenticated session cookies if provided
+      if (process.env.SESSION_COOKIES) {
+        Logger.info('Using SESSION_COOKIES from environment…');
+        this.client.setHeader('Cookie', process.env.SESSION_COOKIES);
+        const meResult = await this.client.request(`{ me { id name } }`);
+        if (meResult?.me?.id) {
+          this.sessionCookies = process.env.SESSION_COOKIES;
+          Logger.info(`✅ Reused session as @${meResult.me.name} (id=${meResult.me.id})`);
+          return;
+        }
+        Logger.warn('SESSION_COOKIES expired or invalid, re-authenticating…');
+      }
+
+      // Step 1: Get k1 challenge from createAuth mutation
+      Logger.debug('Requesting auth challenge (k1)…');
+      const authResult = await this.makeGraphQLRequest(`
+        mutation createAuth {
+          createAuth {
+            k1
+          }
+        }
+      `);
+      const k1 = authResult?.createAuth?.k1;
+      if (!k1) {
+        throw new Error('No k1 challenge received from createAuth');
+      }
+      Logger.info('Auth challenge received', { k1: k1.substring(0, 8) + '…' });
+
+      // Step 2: Create and sign NIP-98 event (kind 27235)
+      Logger.debug('Signing NIP-98 auth event…');
+      const authEvent = {
+        kind: 27235,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['challenge', k1],
+          ['u', 'https://stacker.news'],
+          ['method', 'GET']
+        ],
+        content: 'Stacker News Authentication',
+        pubkey: this.publicKey
+      };
+      const signedEvent = finalizeEvent(authEvent, this.privateKey);
+      Logger.info('Auth event signed', { eventId: signedEvent.id });
+
+      // Step 3: GET CSRF token from NextAuth endpoint
+      Logger.debug('Fetching CSRF token…');
+      const csrfUrl = `${CONFIG.STACKER_NEWS_BASE}/api/auth/csrf`;
+      const csrfResp = await fetch(csrfUrl, {
+        headers: { Accept: 'application/json' }
+      });
+
+      if (csrfResp.status === 200) {
+        // Standard path: CSRF works, complete via callback
+        const csrfData = await csrfResp.json();
+        const csrfToken = csrfData.csrfToken;
+        const mergedCookies = extractSetCookieHeaders(csrfResp.headers);
+        const cleanCookies = sanitizeCookies(mergedCookies);
+        Logger.debug('CSRF token obtained', {
+          csrfToken: csrfToken.substring(0, 8) + '…',
+          cookieCount: cleanCookies ? cleanCookies.split('; ').length : 0
+        });
+
+        // Step 4: POST to Nostr callback with CSRF token + signed event
+        Logger.debug('Completing auth via Nostr callback…');
+        const callbackUrl = `${CONFIG.STACKER_NEWS_BASE}/api/auth/callback/nostr`;
+        let callbackResponse;
+        try {
+          callbackResponse = await fetch(callbackUrl, {
+            method: 'POST',
+            redirect: 'manual',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+              ...(cleanCookies ? { Cookie: cleanCookies } : {})
+            },
+            body: JSON.stringify({
+              csrfToken,
+              event: JSON.stringify(signedEvent),
+              redirect: false
+            })
+          });
+        } catch (fetchErr) {
+          throw new Error(`Callback fetch failed (network): ${fetchErr.message}`);
+        }
+
+        Logger.debug('Callback response', {
+          status: callbackResponse.status,
+          location: callbackResponse.headers.get('location'),
+          headers: Object.fromEntries([...callbackResponse.headers])
+        });
+
+        const sessionCookies = extractSetCookieHeaders(callbackResponse.headers);
+        if (sessionCookies) {
+          this.sessionCookies = sessionCookies;
+          this.client.setHeader('Cookie', sessionCookies);
+          Logger.info('Session cookies set on GraphQL client', {
+            cookies: sessionCookies.split('; ').map(c => c.split('=')[0])
+          });
+        } else {
+          Logger.warn('No session cookies received — auth might not have succeeded');
+        }
+      }
+
+      // If CSRF failed or no session cookies yet, try NIP-98 auth directly on GraphQL
+      if (!this.sessionCookies) {
+        Logger.info('CSRF unavailable (WAF likely blocking), trying NIP-98 auth on GraphQL…');
+        const nip98Event = signNip98Event(
+          CONFIG.STACKER_NEWS_API, 'POST', this.privateKey, this.publicKey
+        );
+        const authHeader = createNip98AuthHeader(nip98Event);
+        const testClient = new GraphQLClient(CONFIG.STACKER_NEWS_API, {
+          headers: { Authorization: authHeader }
+        });
+        const meResult = await testClient.request(`{ me { id name } }`);
+        if (meResult?.me?.id) {
+          this.client.setHeader('Authorization', authHeader);
+          Logger.info(`✅ Authenticated via NIP-98 as @${meResult.me.name} (id=${meResult.me.id})`);
+        } else {
+          throw new Error('NIP-98 auth failed — me query returned null');
+        }
+      }
+
+      // Verify auth by querying me
+      Logger.debug('Verifying auth…');
+      const meResult = await this.client.request(`{ me { id name } }`);
+      if (meResult?.me?.id) {
+        Logger.info(`✅ Authenticated as @${meResult.me.name} (id=${meResult.me.id})`);
+      } else {
+        throw new Error('me query returned null after all auth attempts');
+      }
+
+      Logger.info('✅ Nostr authentication completed');
+      return signedEvent;
+    } catch (error) {
+      Logger.error('❌ Authentication failed', { error: error.message });
+      throw error;
+    }
+  }
+
+  async publishNostrNote(title, postId, invidiousUrl, username, userHexPubkey, videoCount = 1, commentId) {
+    Logger.debug('Publishing Nostr note', { title, postId, invidiousUrl, username, hasPubkey: !!userHexPubkey, videoCount, commentId });
     
-  } catch (error) {
-    console.error('❌ API test failed:', error.message);
-    console.log('💡 Make sure your NOSTR_PRIVATE_KEY is correct and you have internet access.');
+    try {
+      // Build Stacker.News comment link, pointing to the bot's specific comment
+      const stackerLink = `${CONFIG.STACKER_NEWS_BASE}/items/${postId}/r/YewTuBot${commentId ? `?commentId=${commentId}` : ''}`;
+      
+      // Build nostr link from user's hex pubkey → npub, fallback to @username
+      let nprofileLink;
+      if (userHexPubkey) {
+        try {
+          const npub = nip19.npubEncode(userHexPubkey);
+          nprofileLink = `nostr:${npub}`;
+        } catch (e) {
+          nprofileLink = `@${username || 'anonymous'}`;
+        }
+      } else {
+        nprofileLink = `@${username || 'anonymous'}`;
+      }
+      
+      // Create note content
+      const noteContent = CONFIG.NOSTR_NOTE_TEMPLATE
+        .replace('{title}', title || 'Untitled Post')
+        .replace('{stackerLink}', stackerLink)
+        .replace('{nprofileLink}', nprofileLink)
+        .replace('{videoLabel}', videoCount > 1 ? 'videos' : 'video');
+
+      // Create Nostr event
+      const noteEvent = {
+        kind: 1, // Text note
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ['t', 'stackernews'],
+          ['t', 'youtube'],
+          ['t', 'privacy'],
+          ['t', 'yewtubot'],
+          ['r', stackerLink],
+          ['r', invidiousUrl]
+        ],
+        content: noteContent,
+        pubkey: this.publicKey
+      };
+
+      // Sign the event
+      const signedEvent = finalizeEvent(noteEvent, this.privateKey);
+      
+      Logger.info(`Publishing Nostr note for post ${postId}`, {
+        eventId: signedEvent.id,
+        contentLength: noteContent.length,
+        tagCount: signedEvent.tags.length
+      });
+      
+      // Publish to relays
+      const publishPromises = this.nostrPool.publish(CONFIG.NOSTR_RELAYS, signedEvent);
+      
+      const results = await Promise.allSettled(publishPromises);
+      
+      // Count successful publications
+      const successful = results.filter(r => r.status === 'fulfilled').length;
+      const failed = results.filter(r => r.status === 'rejected').length;
+      
+      Logger.info(`Nostr note published`, {
+        successful,
+        failed,
+        total: CONFIG.NOSTR_RELAYS.length,
+        successRate: successful > 0 ? `${Math.round(successful / CONFIG.NOSTR_RELAYS.length * 100)}%` : '0%'
+      });
+      
+      if (failed > 0) {
+        const failedRelays = results
+          .map((r, i) => r.status === 'rejected' ? { relay: CONFIG.NOSTR_RELAYS[i], error: r.reason?.message || r.reason } : null)
+          .filter(Boolean);
+        Logger.warn('Failed relay publications', failedRelays);
+      }
+      
+      return { successful, failed, total: CONFIG.NOSTR_RELAYS.length };
+    } catch (error) {
+      Logger.error('Error publishing Nostr note', { error: error.message, postId });
+      throw error;
+    }
+  }
+
+  async postComment(postId, text) {
+    Logger.debug('Posting comment', { postId, textLength: text.length });
+    
+    try {
+      const response = await this.client.request(QUERIES.POST_COMMENT, {
+        parentId: postId,
+        text: text
+      });
+      Logger.debug('Comment posted successfully', { commentId: response.upsertComment?.id });
+      return response.upsertComment;
+    } catch (error) {
+      Logger.error('Error posting comment', { error: error.message, postId, textPreview: text.slice(0, 50) });
+      throw error;
+    }
+  }
+
+  async checkWalletBalance() {
+    try {
+      Logger.debug('Checking wallet balance...');
+      const response = await this.makeGraphQLRequest(QUERIES.ME_WALLET);
+      const privates = response?.me?.privates;
+      if (!privates) {
+        Logger.warn('Could not fetch wallet balance, assuming 0 credits');
+        this.creditBalance = 0;
+        return 0;
+      }
+      this.creditBalance = privates.credits || 0;
+      Logger.info(`💰 Wallet balance: ${this.creditBalance} mcredits${privates.sats ? `, ${privates.sats} msats` : ''}`);
+      return this.creditBalance;
+    } catch (error) {
+      Logger.warn('Error fetching wallet balance, assuming 0 credits', { error: error.message });
+      this.creditBalance = 0;
+      return 0;
+    }
+  }
+
+  async processPost(post) {
+    Logger.debug(`Processing post ${post.id}`, {
+      id: post.id,
+      title: post.title?.slice(0, 50) + (post.title?.length > 50 ? '...' : ''),
+      hasText: !!post.text,
+      hasUrl: !!post.url,
+      createdAt: post.createdAt,
+      user: post.user?.name
+    });
+
+    if (this.commentedPosts.has(post.id)) {
+      Logger.debug(`Post ${post.id} already commented, skipping`);
+      return false;
+    }
+
+    const content = `${post.title || ''} ${post.text || ''} ${post.url || ''}`;
+    Logger.debug(`Checking content for YouTube links`, {
+      contentLength: content.length,
+      contentPreview: content.slice(0, 100) + (content.length > 100 ? '...' : '')
+    });
+    
+    const allVideos = this.extractAllYouTubeIds(content);
+    
+    if (allVideos.length === 0) {
+      Logger.debug(`No YouTube links found in post ${post.id}`);
+      return false;
+    }
+
+    Logger.info(`📺 ${allVideos.length} YouTube link(s) detected in post ${post.id}`, {
+      videoIds: allVideos.map(v => v.id)
+    });
+
+    // Check if bot already commented via API (catches cases not in local state)
+    if (post.comments?.comments?.some(c => c.user?.name === BOT_USERNAME)) {
+      Logger.info(`Post ${post.id} already has a comment from @${BOT_USERNAME}, skipping`);
+      this.commentedPosts.add(post.id);
+      return false;
+    }
+
+    try {
+      // Convert all videos to Invidious and optionally fetch titles
+      const invidiousLinks = [];
+      for (const video of allVideos) {
+        const invidiousUrl = this.convertToInvidious(video.url, video.id);
+        const title = await this.fetchVideoTitle(video.id);
+        invidiousLinks.push({ ...video, invidiousUrl, title });
+      }
+
+      // Build comment text
+      let commentText;
+      if (invidiousLinks.length === 1) {
+        commentText = CONFIG.COMMENT_TEMPLATE.replace('{link}', invidiousLinks[0].invidiousUrl);
+      } else {
+        const lines = invidiousLinks.map(v => {
+          const label = v.title ? `"${v.title}"` : v.invidiousUrl;
+          return `- ${label}: ${v.invidiousUrl}`;
+        });
+        commentText = CONFIG.COMMENT_TEMPLATE_MULTI.replace('{videoLinks}', lines.join('\n'));
+      }
+
+      Logger.info(`🔄 Processing ${invidiousLinks.length} YouTube link(s) in post ${post.id}`, {
+        links: invidiousLinks.map(v => ({ id: v.id, title: v.title, url: v.invidiousUrl })),
+        postDetails: {
+          title: post.title?.slice(0, 50) + (post.title?.length > 50 ? '...' : ''),
+          createdAt: post.createdAt,
+          user: post.user?.name || 'Unknown',
+          age: Math.round((Date.now() - new Date(post.createdAt).getTime()) / (1000 * 60)) + ' minutes ago'
+        }
+      });
+
+      // Check if we can afford to comment
+      const cost = post.commentCost || 0;
+      if (cost > this.creditBalance) {
+        Logger.info(`⏭️  Skipping post ${post.id}: comment costs ${cost} mcredits but balance is ${this.creditBalance}`);
+        return false;
+      }
+      if (cost > 0) {
+        Logger.info(`💸 Comment will cost ${cost} mcredit(s) (balance: ${this.creditBalance})`);
+      }
+
+      // Check stacked value: sats + credits - boost - commentCost must be >= MIN_STACKED_VALUE
+      const stackedValue = (post.sats || 0) + (post.credits || 0) - (post.boost || 0) - cost;
+      if (stackedValue < CONFIG.MIN_STACKED_VALUE) {
+        Logger.info(`⏭️  Skipping post ${post.id}: stacked value ${stackedValue} is below minimum ${CONFIG.MIN_STACKED_VALUE} (sats=${post.sats || 0}, credits=${post.credits || 0}, boost=${post.boost || 0}, cost=${cost})`);
+        return false;
+      }
+      Logger.info(`📊 Stacked value ${stackedValue} meets minimum threshold of ${CONFIG.MIN_STACKED_VALUE}`);
+
+      // Post comment on Stacker.News
+      Logger.info(`💬 Posting comment on post ${post.id}...`);
+      const comment = await this.postComment(post.id, commentText);
+      const commentId = comment?.id;
+      Logger.info(`✅ Comment posted successfully on post ${post.id}`, { commentId });
+
+      // Deduct the cost from our cached balance
+      this.creditBalance -= cost;
+
+      // Publish Nostr note (pass first invidious URL for tagging, video count for label)
+      Logger.info(`📡 Publishing Nostr note for post ${post.id}...`);
+      const nostrResult = await this.publishNostrNote(
+        post.title, post.id, invidiousLinks[0].invidiousUrl,
+        post.user?.name, post.user?.optional?.nostrAuthPubkey, invidiousLinks.length,
+        commentId
+      );
+      Logger.info(`✅ Nostr note published for post ${post.id}`, nostrResult);
+
+      this.processedPosts.add(post.id);
+      this.commentedPosts.add(post.id);
+
+      Logger.info(`🎉 Successfully processed post ${post.id}`, {
+        actions: ['comment_posted', 'nostr_note_published'],
+        videosCount: invidiousLinks.length,
+        nostrRelaysSuccess: nostrResult.successful
+      });
+
+      return true;
+    } catch (error) {
+      Logger.error(`❌ Failed to process post ${post.id}`, {
+        error: error.message,
+        videosFound: allVideos.length,
+        videoIds: allVideos.map(v => v.id)
+      });
+
+      return false;
+    }
+  }
+
+  async run() {
+    if (this.isRunning) {
+      Logger.warn('Bot is already running');
+      return;
+    }
+
+    this.isRunning = true;
+    const startTime = Date.now();
+    
+    try {
+      Logger.info('🚀 Starting Stacker.News YouTube Bot (Enhanced Debug Mode)');
+      Logger.info('Bot Configuration', {
+        publicKey: this.publicKey,
+        scanLimit: CONFIG.SCAN_LIMIT,
+        commentLimit: CONFIG.COMMENT_LIMIT,
+        commentDelay: CONFIG.COMMENT_DELAY / 1000 + 's',
+        maxMisses: CONFIG.MAX_CONSECUTIVE_MISSES,
+        rateLimit: CONFIG.RATE_LIMIT_DELAY + 'ms',
+        debugMode: CONFIG.DEBUG,
+        backfillMode: CONFIG.BACKFILL_ENABLED,
+        backfillDepth: CONFIG.BACKFILL_DEPTH,
+        invidiousInstances: CONFIG.INVIDIOUS_INSTANCES.length,
+        nostrRelaysCount: CONFIG.NOSTR_RELAYS.length
+      });
+      
+      // Load previous state
+      await this.loadState();
+      
+      // Authenticate with Nostr
+      await this.authenticateWithNostr();
+      
+      // Ensure we have a working query before fetching
+      // Re-derive if cached query is outdated (missing newer fields)
+      if (!this.workingQuery || (this.workingQuery.name === 'RECENT_ITEMS' && (!this.workingQuery.query.includes('nostrAuthPubkey') || !this.workingQuery.query.includes('sort: \"new\"')))) {
+        this.workingQuery = null;
+        await this.findWorkingQuery();
+      }
+      
+      // Check wallet balance before scanning
+      await this.checkWalletBalance();
+      if (this.creditBalance < 1) {
+        Logger.warn('⚠️  No mcredits available (balance: 0). Skipping run — will retry next time.');
+        Logger.step(4, 7, 'Skipped — insufficient mcredits');
+        await this.saveState();
+        Logger.step(5, 7, 'Run skipped — no mcredits');
+        this.isRunning = false;
+        return;
+      }
+      Logger.info(`💰 Sufficient mcredits (${this.creditBalance}), proceeding with scan`);
+      
+      Logger.step(4, 7, 'Scanning posts newest-first for YouTube links with ≥ 123 stacked value');
+      
+      let cursor = null;
+      let consecutiveMisses = 0;
+      let totalFetched = 0;
+      let processedCount = 0;
+      let commentedCount = 0;
+      let nostrNotesCount = 0;
+      let youtubeLinksFound = 0;
+      
+      const query = this.workingQuery.query;
+      
+      while (commentedCount < CONFIG.COMMENT_LIMIT) {
+        const vars = { limit: CONFIG.SCAN_LIMIT };
+        if (cursor) vars.cursor = cursor;
+        
+        const response = await this.makeGraphQLRequest(query, vars);
+        const posts = response?.items?.items?.filter(item => item && item.id) || [];
+        
+        if (posts.length === 0) {
+          Logger.info('No more posts available, stopping');
+          break;
+        }
+        
+        cursor = response.items.cursor;
+        totalFetched += posts.length;
+        
+        Logger.info(`📄 Page: ${posts.length} posts (total fetched: ${totalFetched}, comments: ${commentedCount}/${CONFIG.COMMENT_LIMIT})`);
+        
+        for (const post of posts) {
+          processedCount++;
+          
+          const result = await this.processPost(post);
+          if (result) {
+            commentedCount++;
+            nostrNotesCount++;
+            youtubeLinksFound++;
+            consecutiveMisses = 0;
+            
+            if (commentedCount >= CONFIG.COMMENT_LIMIT) {
+              Logger.info(`✅ Reached target of ${CONFIG.COMMENT_LIMIT} comments`);
+              break;
+            }
+            
+            Logger.info(`⏳ Comment ${commentedCount}/${CONFIG.COMMENT_LIMIT}: waiting ${CONFIG.COMMENT_DELAY / 1000}s...`);
+            await this.sleep(CONFIG.COMMENT_DELAY);
+          } else {
+            consecutiveMisses++;
+          }
+        }
+        
+        if (commentedCount >= CONFIG.COMMENT_LIMIT) break;
+
+        if (!cursor) {
+          Logger.info('No more cursor pages, reached end of available posts');
+          break;
+        }
+        
+        if (consecutiveMisses >= CONFIG.MAX_CONSECUTIVE_MISSES) {
+          Logger.info(`⏹️  Stopping: ${consecutiveMisses} consecutive posts without YouTube content`);
+          break;
+        }
+        
+        await this.sleep(CONFIG.RATE_LIMIT_DELAY);
+      }
+      
+      Logger.step(5, 7, 'Saving state and generating summary');
+      
+      // Save state
+      await this.saveState();
+      
+      Logger.step(6, 7, 'Run completed successfully');
+      
+      const runTime = Math.round((Date.now() - startTime) / 1000);
+      const summary = {
+        runtime: `${runTime}s`,
+        mode: CONFIG.BACKFILL_ENABLED ? 'backfill' : 'live',
+        postsFetched: totalFetched,
+        postsProcessed: processedCount,
+        youtubeLinksFound: youtubeLinksFound,
+        commentsPosted: commentedCount,
+        nostrNotesPublished: nostrNotesCount,
+        successRate: processedCount > 0 ? `${Math.round(youtubeLinksFound / processedCount * 100)}%` : '0%',
+        workingQuery: this.workingQuery?.name || 'none',
+        totalProcessedPosts: this.processedPosts.size,
+        totalCommentedPosts: this.commentedPosts.size
+      };
+      
+      Logger.info('🏁 Bot run completed', summary);
+      
+      // Performance insights
+      if (youtubeLinksFound === 0 && processedCount > 0) {
+        Logger.warn('⚠️  No YouTube links found in any posts. This might indicate:');
+        Logger.warn('   - YouTube content is currently rare in the /new feed');
+        Logger.warn('   - The working query/API may have changed');
+        Logger.warn('   - All YouTube posts found had insufficient stacked value (< 123)');
+        Logger.info('💡 Consider checking if the working query is still fetching posts correctly');
+      }
+      
+      if (commentedCount > 0) {
+        Logger.info(`📊 Engagement rate: Found YouTube content in ${youtubeLinksFound}/${processedCount} posts (${Math.round(youtubeLinksFound/processedCount*100)}%)`);
+      }
+      
+    } catch (error) {
+      Logger.error('💥 Bot run failed', { error: error.message, stack: error.stack });
+      process.exit(1);
+    } finally {
+      this.isRunning = false;
+      // Close Nostr pool connections so the process can exit cleanly
+      if (this.nostrPool) {
+        try {
+          this.nostrPool.close(CONFIG.NOSTR_RELAYS);
+        } catch (_) {}
+      }
+    }
+  }
+
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async cleanup() {
+    Logger.info('🧹 Cleaning up bot resources...');
+    
+    // Close Nostr pool connections
+    if (this.nostrPool) {
+      try {
+        this.nostrPool.close(CONFIG.NOSTR_RELAYS);
+        Logger.info('✅ Closed Nostr relay connections');
+      } catch (error) {
+        Logger.warn('⚠️  Error closing Nostr connections', { error: error.message });
+      }
+    }
+    
+    await this.saveState();
+    Logger.info('🏁 Cleanup completed');
   }
 }
 
-// Run tests if this file is executed directly
-if (require.main === module) {
-  const args = process.argv.slice(2);
+// Main execution
+async function main() {
+  Logger.info('🎬 Initializing Stacker.News YouTube Bot...');
   
-  if (args.includes('--api')) {
-    // Run with API tests
-    Promise.all([testBot(), testWithAPI()]).catch(console.error);
-  } else {
-    // Run basic tests only
-    testBot().catch(console.error);
+  const bot = new StackerNewsBot();
+  
+  // Handle graceful shutdown
+  process.on('SIGINT', async () => {
+    Logger.info('🛑 Received SIGINT, shutting down gracefully...');
+    await bot.cleanup();
+    process.exit(0);
+  });
+  
+  process.on('SIGTERM', async () => {
+    Logger.info('🛑 Received SIGTERM, shutting down gracefully...');
+    await bot.cleanup();
+    process.exit(0);
+  });
+  
+  try {
+    await bot.run();
+  } catch (error) {
+    Logger.error('💀 Fatal error occurred', { error: error.message, stack: error.stack });
+    process.exit(1);
   }
+  
+  // Force exit — Nostr pool WebSocket connections keep the event loop alive otherwise
+  process.exit(0);
 }
 
-module.exports = { testBot, mockPosts };
+// Run if called directly
+if (require.main === module) {
+  main();
+}
+
+module.exports = StackerNewsBot;
