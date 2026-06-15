@@ -382,25 +382,55 @@ class StackerNewsBot {
   }
 
   async refreshWorkingInstances() {
-    Logger.step(3, 7, 'Checking Invidious instances');
+    Logger.step(3, 7, 'Discovering working Invidious instances');
+
+    // Try to fetch the official instance list first
+    let candidates = CONFIG.INVIDIOUS_INSTANCES;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch('https://api.invidious.io/instances.json?sort_by=type,health', { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const instances = await res.json();
+        const healthy = instances
+          .filter(([, data]) =>
+            data.type === 'https' &&
+            data.monitor &&
+            !data.monitor.down &&
+            (data.monitor.uptime || 0) >= 90
+          )
+          .map(([host]) => `https://${host}`);
+        if (healthy.length > 0) {
+          candidates = healthy;
+          Logger.info(`📡 Discovered ${candidates.length} healthy public Invidious instances`);
+        }
+      }
+    } catch {
+      Logger.warn('⚠️  Could not fetch official instance list — using hardcoded fallback');
+    }
+
+    // Verify candidates respond
     const working = [];
-    for (const url of CONFIG.INVIDIOUS_INSTANCES) {
+    for (const url of candidates) {
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 5000);
-        const res = await fetch(`${url}/api/v1/stats`, { signal: controller.signal });
-        clearTimeout(timeout);
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 5000);
+        const res = await fetch(`${url}/api/v1/stats`, { signal: ctrl.signal });
+        clearTimeout(t);
         if (res.ok) {
           working.push(url);
         }
       } catch {
-        // instance unreachable, skip
+        // unreachable
       }
     }
-    this.workingInvidiousInstances = working.length > 0 ? working : CONFIG.INVIDIOUS_INSTANCES;
-    Logger.info(`📡 Invidious: ${this.workingInvidiousInstances.length}/${CONFIG.INVIDIOUS_INSTANCES.length} instances responsive`);
+
+    this.workingInvidiousInstances = working.length > 0 ? working : candidates;
+    Logger.info(`📡 Invidious: ${this.workingInvidiousInstances.length}/${candidates.length} responsive`);
     if (working.length === 0) {
-      Logger.warn('⚠️  No Invidious instances responded — will try all anyway');
+      Logger.warn('⚠️  No Invidious instances responded — will try hardcoded list anyway');
+      this.workingInvidiousInstances = CONFIG.INVIDIOUS_INSTANCES;
     }
   }
 
