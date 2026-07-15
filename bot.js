@@ -481,6 +481,9 @@ class StackerNewsBot {
           }
         } catch (err) {
           Logger.warn('SESSION_COOKIES rejected by server, re-authenticating via Nostr…', { error: err.message });
+          if (this.client.requestConfig.headers) {
+            delete this.client.requestConfig.headers['Cookie'];
+          }
         }
       }
 
