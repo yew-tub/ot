@@ -471,14 +471,17 @@ class StackerNewsBot {
       // Use pre-authenticated session cookies if provided
       if (process.env.SESSION_COOKIES) {
         Logger.info('Using SESSION_COOKIES from environment…');
-        this.client.setHeader('Cookie', process.env.SESSION_COOKIES);
-        const meResult = await this.client.request(`{ me { id name } }`);
-        if (meResult?.me?.id) {
-          this.sessionCookies = process.env.SESSION_COOKIES;
-          Logger.info(`✅ Reused session as @${meResult.me.name} (id=${meResult.me.id})`);
-          return;
+        try {
+          this.client.setHeader('Cookie', process.env.SESSION_COOKIES);
+          const meResult = await this.client.request(`{ me { id name } }`);
+          if (meResult?.me?.id) {
+            this.sessionCookies = process.env.SESSION_COOKIES;
+            Logger.info(`✅ Reused session as @${meResult.me.name} (id=${meResult.me.id})`);
+            return;
+          }
+        } catch (err) {
+          Logger.warn('SESSION_COOKIES rejected by server, re-authenticating via Nostr…', { error: err.message });
         }
-        Logger.warn('SESSION_COOKIES expired or invalid, re-authenticating…');
       }
 
       // Step 1: Get k1 challenge from createAuth mutation
