@@ -695,14 +695,68 @@ class StackerNewsBot {
     }
   }
 
+// ----- Fee gate -----
+  // Pre-flight guard against SN's 10x/100x/1000x fee escalation: blocks if
+  // itemRepetition would force a multiplier above the cap. This bot runs on a
+  // tight cadence, so the default mode is 'skip' (fail fast) rather than
+  // sleeping ~10 min inside a scheduled run.
+
+  feeMaxMultiplier() {
+    const n = Number(process.env.SN_MAX_FEE_MULTIPLIER);
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  }
+
+  feeMaxRetries() {
+    const n = Number(process.env.SN_FEE_MAX_RETRIES);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  }
+
+  feeRetryMin() {
+    const n = Number(process.env.SN_FEE_RETRY_MIN);
+    return Number.isFinite(n) && n > 0 ? n : 10;
+  }
+
+  feeMode() {
+    return process.env.SN_FEE_RETRY_MODE || 'skip';
+  }
+
+  async feeRepetition(parentId = null) {
+    const data = await this.makeGraphQLRequest(
+      'query FeeRepetition($parentId: ID) { itemRepetition(parentId: $parentId) }',
+      { parentId: parentId ? String(parentId) : null }
+    );
+    return Number(data?.itemRepetition || 0);
+  }
+
+  async feeSafe(parentId, action) {
+    const maxMultiplier = this.feeMaxMultiplier();
+    const maxRetries = this.feeMaxRetries();
+    const mode = this.feeMode();
+    const retryMin = this.feeRetryMin();
+    let attempt = 0;
+    for (;;) {
+      const rep = await this.feeRepetition(parentId);
+      if (10 ** rep <= maxMultiplier) return action();
+      if (mode === 'skip' || attempt >= maxRetries) {
+        const msg = `[fee-gate] blocked: itemRepetition=${rep}; multiplier would be ${10 ** rep}x; gave up after ${attempt}/${maxRetries} retries`;
+        Logger.error(msg, { parentId });
+        throw new Error(msg);
+      }
+      attempt += 1;
+      const waitMs = retryMin * 60_000 + Math.round(Math.random() * 60_000);
+      Logger.warn(`[fee-gate] repetition=${rep} (would pay ${10 ** rep}x, cap ${maxMultiplier}x) — sleeping ${Math.round(waitMs / 60_000)} min, retry ${attempt}/${maxRetries}`);
+      await this.sleep(waitMs);
+    }
+  }
+
   async postComment(postId, text) {
     Logger.debug('Posting comment', { postId, textLength: text.length });
-    
+
     try {
-      const response = await this.client.request(QUERIES.POST_COMMENT, {
+      const response = await this.feeSafe(postId, () => this.client.request(QUERIES.POST_COMMENT, {
         parentId: postId,
         text: text
-      });
+      }));
       Logger.debug('Comment posted successfully', { commentId: response.upsertComment?.id });
       return response.upsertComment;
     } catch (error) {
