@@ -128,7 +128,8 @@ Go to **Settings → Secrets and variables → Actions** and add:
 | `TARGET_SETTLE_HOURS` | `48` | Wait before reading a comment's outcome |
 | `NOSTR_INCLUDE_THUMBNAIL` | `true` | Put the video thumbnail in the Nostr note |
 | `THUMBNAIL_QUALITY` | `hqdefault` | Thumbnail variant (`hqdefault` is the most reliable) |
-| `BLOSSOM_ENABLED` | `true` | Upload to Blossom (off in the workflow — public servers reject it) |
+| `BLOSSOM_ENABLED` | `true` | Upload the thumbnail to Blossom |
+| `BLOSSOM_SERVERS` | `https://cdn.hzrd149.com` | Comma-separated Blossom servers, tried in order |
 | `BLOSSOM_SERVERS` | blossom.primal.net,blossom.band | Comma-separated BUD-02 endpoints |
 | `GIST_ENABLED` | `false` | Mirror records to a private gist |
 | `GIST_TOKEN` | — | PAT with `gist` scope (required for `GIST_ENABLED`) |
@@ -332,7 +333,7 @@ the "Watch the video" line:
 ```
 @alice posted "Cool Video"
 
-![Cool Video](https://blossom.primal.net/<sha256>.jpg)
+![Cool Video](https://cdn.hzrd149.com/<sha256>)
 
 Watch the video https://stacker.news/items/123/r/YewTuBot?commentId=c1
 ```
@@ -342,8 +343,29 @@ Primal render natively. The bytes are fetched from a working Invidious instance
 first and from `i.ytimg.com` as a fallback (`yewtu.be` returns 403 for hotlinked
 thumbnails), and the resulting URL is cached per video for the run.
 
-**Blossom upload is disabled by default.** Every public Blossom server tested
-rejects programmatic uploads from a fresh key:
+Thumbnails are uploaded to **https://cdn.hzrd149.com**, the one public Blossom
+server found that accepts signed programmatic uploads. The note then carries a
+content-addressed URL (`/<sha256>`) rather than a dependency on the YouTube CDN.
+If the upload fails the note still renders, falling back to the direct
+`i.ytimg.com` URL, and the bot stops retrying for the rest of the run.
+
+The auth event shape is the part that is easy to get wrong. This server requires
+a **kind 24242** event carrying:
+
+| Tag | Value | Required |
+|---|---|---|
+| `u` | the endpoint being called | yes |
+| `t` | the literal token type — `upload` for `/upload`, `media` for `/media` | yes |
+| `expiration` | unix seconds | yes |
+| `x` | sha256 hex | no (sent anyway) |
+| `action`, `method` | — | no (accepted, ignored) |
+
+The `t` tag is the trap. Omitting it fails with `Auth event missing t tag`, and
+putting the content MIME type there (`image/jpeg`) fails with `Auth token type
+"image/jpeg" does not match required "upload"`. Only the literal string `upload`
+works. Encoding must be standard base64, not base64url.
+
+Other public servers were tried and all refuse uploads from a fresh key:
 
 | Server | Result |
 |---|---|
@@ -356,17 +378,10 @@ rejects programmatic uploads from a fresh key:
 Both auth kinds (24242 and 27235), standard and base64url encodings, single-event
 and array payloads, `/upload` and server-root `u` tags, with and without
 `X-SHA-256`, and the `/media` and anonymous hash-path endpoints were all tried.
-Since the attempt only cost round-trips before falling back to the same image,
-`BLOSSOM_ENABLED` defaults to `false` in the workflow.
+Point `BLOSSOM_SERVERS` at a comma-separated list; the bot tries each in order.
 
-This costs little: the image is served straight from `i.ytimg.com`, one of the most
-durable CDNs in use, and YouTube thumbnails are public content, so Blossom's
-privacy advantage barely applies here. Set `BLOSSOM_ENABLED=true` and point
-`BLOSSOM_SERVERS` at a server you run to get content-addressed URLs; after one
-failed round the bot stops retrying for the rest of the run either way.
-
-The thumbnail bytes are still fetched and validated even with Blossom off, so a
-dead video id produces no image rather than a broken one.
+The thumbnail bytes are always fetched and validated, so a dead video id
+produces no image rather than a broken one.
 
 ## Configuration Reference
 

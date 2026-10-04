@@ -82,7 +82,7 @@ const CONFIG = {
   // BUD-02 content-addressed upload. Public servers are increasingly auth-walled,
   // so a failure here is expected and non-fatal.
   BLOSSOM_ENABLED: process.env.BLOSSOM_ENABLED !== 'false',
-  BLOSSOM_SERVERS: (process.env.BLOSSOM_SERVERS || 'https://blossom.primal.net,https://blossom.band')
+  BLOSSOM_SERVERS: (process.env.BLOSSOM_SERVERS || 'https://cdn.hzrd149.com')
     .split(',').map(s => s.trim()).filter(Boolean),
   BLOSSOM_TIMEOUT_MS: parseInt(process.env.BLOSSOM_TIMEOUT_MS || '15000', 10),
   // Human-readable off-repo archive + backup of the track records.
@@ -734,19 +734,25 @@ class StackerNewsBot {
     return null;
   }
 
-  // NIP-98 / BUD-11 signed auth header. Public servers disagree on the exact
-  // shape, so each candidate is tried in turn.
-  blossomAuthHeaders(url, sha, bytes, kind) {
+  // BUD-02 / BUD-05 signed auth header. The required shape is a kind 24242
+  // event carrying `u` (the endpoint), `t` (the token type, which must match the
+  // endpoint: "upload" for /upload, "media" for /media) and `expiration`.
+  // Servers reject the event outright when `t` is absent, and reject it with
+  // "token type does not match" when `t` holds something else such as the
+  // content MIME type. `x` and the X-SHA-256 header are accepted but optional.
+  blossomAuthHeaders(url, sha, bytes, tokenType = 'upload') {
     const now = Math.floor(Date.now() / 1000);
-    const tags = [
-      ['u', url],
-      ['x', sha],
-      ['expiration', String(now + 3600)]
-    ];
-    if (kind === 'action') tags.push(['action', 'upload']);
-    else tags.push(['method', 'PUT']);
-    if (kind !== 'action') tags.push(['action', 'upload']);
-    const event = finalizeEvent({ kind: 24242, created_at: now, tags, content: 'Upload thumbnail' }, this.privateKey);
+    const event = finalizeEvent({
+      kind: 24242,
+      created_at: now,
+      tags: [
+        ['u', url],
+        ['t', tokenType],
+        ['x', sha],
+        ['expiration', String(now + 3600)]
+      ],
+      content: 'Upload thumbnail'
+    }, this.privateKey);
     return { Authorization: 'Nostr ' + Buffer.from(JSON.stringify(event)).toString('base64') };
   }
 
@@ -756,11 +762,9 @@ class StackerNewsBot {
     const sha = createHash('sha256').update(bytes).digest('hex');
     for (const server of CONFIG.BLOSSOM_SERVERS) {
       const base = server.replace(/\/$/, '');
-      const uploadUrl = `${base}/upload`;
       const attempts = [
-        { url: uploadUrl, auth: null },
-        { url: uploadUrl, auth: this.blossomAuthHeaders(uploadUrl, sha, bytes, 'action') },
-        { url: uploadUrl, auth: this.blossomAuthHeaders(uploadUrl, sha, bytes, 'method') },
+        { url: `${base}/upload`, auth: this.blossomAuthHeaders(`${base}/upload`, sha, bytes, 'upload') },
+        { url: `${base}/media`, auth: this.blossomAuthHeaders(`${base}/media`, sha, bytes, 'media') },
         { url: `${base}/${sha}.${ext}`, auth: null }
       ];
       for (const a of attempts) {

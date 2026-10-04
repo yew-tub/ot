@@ -77,17 +77,17 @@ jobs:
         GIST_ID: ${{ secrets.GIST_ID }}
         # Thumbnail in the Nostr note, embedded directly from the YouTube CDN.
         #
-        # Blossom upload is off: every public Blossom server tested
-        # (blossom.primal.net, blossom.band, blossom.nostr.build,
-        # cdn.blossom.cloud, blossom.yabu.me) rejects programmatic uploads, so
-        # the attempt only cost round-trips before falling back anyway. The
-        # thumbnail bytes are still fetched and validated, so a dead video id
-        # yields no image rather than a broken one.
-        # Set BLOSSOM_ENABLED=true and point BLOSSOM_SERVERS at a server you
-        # run to get content-addressed URLs.
+        # Thumbnails are uploaded to a Blossom server so the note carries a
+        # content-addressed URL instead of depending on the YouTube CDN.
+        # cdn.hzrd149.com is the one public server found that accepts signed
+        # uploads; it requires a kind 24242 auth event whose `t` tag holds the
+        # literal token type ("upload" for /upload, "media" for /media), not
+        # the content MIME type. If it ever stops accepting uploads the note
+        # still renders, falling back to the direct i.ytimg.com URL.
         NOSTR_INCLUDE_THUMBNAIL: 'true'
         THUMBNAIL_QUALITY: 'hqdefault'
-        BLOSSOM_ENABLED: 'false'
+        BLOSSOM_ENABLED: 'true'
+        BLOSSOM_SERVERS: 'https://cdn.hzrd149.com'
         # Fund proven winners before unknowns instead of taking feed order.
         PRIORITIZE_TARGETS: 'true'
         # Stand down when realised rolling ROI drops below the floor.
