@@ -166,7 +166,24 @@ The workflow (`.github/workflows/bot.yml`) runs every 7 minutes via cron:
 - **Scheduled runs**: `BACKFILL=false`, `LIVE_DEPTH=2` (100 posts max)
 - **Manual trigger with rescan**: `BACKFILL=true`, clear state, scan 50 pages deep
 
-After a period without commits, GitHub may disable scheduled workflows. Push a trivial commit to re-enable:
+After a period without commits, GitHub may disable scheduled workflows.
+
+### Keep-alive and its heartbeat
+
+`.github/workflows/keep-alive.yml` commits to `.keepalive` every Monday at 03:30 UTC,
+which is what keeps the schedules enabled in the first place.
+
+That creates a quiet failure mode: if the keep-alive stops committing, nothing happens
+for 60 days and then every scheduled bot run silently stops. To make that visible, the
+workflow maintains a single tracked issue titled with `keepalive heartbeat`:
+
+- a failed run opens the issue (or comments on it if it is already open) with the run link
+- a successful run comments that it recovered and closes the issue
+
+An open issue therefore always means "the keep-alive is broken". No webhook, email, or
+extra secret is needed — it uses the built-in `GITHUB_TOKEN` with `issues: write`.
+
+To re-enable schedules by hand after an outage:
 
 ```bash
 git commit --allow-empty -m "chore: ping scheduled workflows"

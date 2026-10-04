@@ -3,13 +3,15 @@ name: Keep Alive
 on:
   schedule:
     - cron: '30 3 * * 1'  # Every Monday at 03:30 UTC
+  workflow_dispatch:  # manual run, for testing the heartbeat
 
 jobs:
   touch:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
     permissions:
       contents: write
+      issues: write
     steps:
     - uses: actions/checkout@v6
 
@@ -25,3 +27,41 @@ jobs:
         git push https://x-access-token:${GITHUB_TOKEN}@github.com/yew-tub/ot.git HEAD:main
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    # A keep-alive that silently stops committing is the dangerous case: GitHub
+    # disables scheduled workflows after 60 days without repository activity,
+    # which would silently end the bot. The heartbeat is a single tracked issue
+    # so the signal lives in the repo and needs no webhook or email setup.
+    - name: Raise heartbeat on failure
+      if: failure()
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        NUM=$(gh issue list --state open --limit 100 --json number,title \
+          --jq '.[] | select(.title | test("keepalive heartbeat"; "i")) | .number' | head -1)
+        BODY="The weekly keep-alive run did not complete successfully.
+
+        If this keeps failing, no commits land on this repository, and GitHub will
+        disable the scheduled workflows after 60 days of inactivity. That would stop
+        every **YewTuBot** run, and the only symptom would be revenue quietly flatlining.
+
+        Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        Commit: ${{ github.sha }}
+        Branch: ${{ github.ref }}
+        "
+        if [ -n "$NUM" ]; then
+          gh issue comment "$NUM" --body "$BODY"
+        else
+          gh issue create --title "keepalive heartbeat: weekly touch failing" --body "$BODY"
+        fi
+
+    - name: Clear heartbeat on success
+      if: success()
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        for NUM in $(gh issue list --state open --limit 100 --json number,title \
+          --jq '.[] | select(.title | test("keepalive heartbeat"; "i")) | .number'); do
+          gh issue comment "$NUM" --body "Recovered — the weekly keep-alive completed successfully on run ${{ github.run_id }}."
+          gh issue close "$NUM"
+        done
