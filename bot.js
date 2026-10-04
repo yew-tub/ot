@@ -8,6 +8,7 @@
 
 const { getPublicKey, finalizeEvent, nip19, SimplePool } = require('nostr-tools');
 const { GraphQLClient } = require('graphql-request');
+const { createHash } = require('crypto');
 const fs = require('fs').promises;
 const WebSocket = require('ws');
 global.WebSocket = WebSocket;
@@ -18,17 +19,43 @@ const CONFIG = {
   STACKER_NEWS_BASE: 'https://stacker.news',
   COMMENT_TEMPLATE: '🔗 Privacy-friendly: {link}',
   COMMENT_TEMPLATE_MULTI: '🔗 Privacy-friendly video links:\n{videoLinks}',
-  NOSTR_NOTE_TEMPLATE: '{nprofileLink} posted "{title}"\n\nWatch the {videoLabel} {stackerLink}\n\n#stackernews #watch #privacy #video',
+  NOSTR_NOTE_TEMPLATE: '{nprofileLink} posted "{title}"\n\n{thumbnail}\n\nWatch the {videoLabel} {stackerLink}\n\n#stackernews #watch #privacy #video',
   SCAN_LIMIT: 50,
   COMMENT_LIMIT: 3,
   COMMENT_DELAY: 21000,
   MAX_CONSECUTIVE_MISSES: 500,
   MIN_STACKED_VALUE: 123,
+  // Profit gates. Measured over 689 organic comments (self-zaps excluded):
+  // zap rate is flat (~10-14%) across every commentCost band, so an expensive
+  // post is not more likely to be zapped — it just costs more. Net result by
+  // band was +701 (cost 1-2), +700 (3-5), -623 (6-10), -652 (11+).
+  MAX_COMMENT_COST: parseInt(process.env.MAX_COMMENT_COST || '5', 10),
+  // Zaps land while a post is in its engagement window; older posts keep their
+  // stacked value but stop attracting attention. 0 or null disables a bound.
+  MIN_POST_AGE_MIN: parseInt(process.env.MIN_POST_AGE_MIN || '30', 10),
+  MAX_POST_AGE_MIN: parseInt(process.env.MAX_POST_AGE_MIN || '360', 10),
+  // Causal per-author / per-sub track records.
+  //
+  // Records are never final: confidence decays with a half-life, so a target that
+  // stops being commented on gradually loses its verdict and automatically returns
+  // to probation, where it is re-tested with real money at risk. That is what stops
+  // a dead-list from permanently blacklisting an author who simply had a bad month.
+  TARGET_STATS_ENABLED: process.env.TARGET_STATS_ENABLED !== 'false',
+  TARGET_MIN_COMMENTS: parseInt(process.env.TARGET_MIN_COMMENTS || '8', 10),
+  TARGET_MIN_NET_PER: parseInt(process.env.TARGET_MIN_NET_PER || '0', 10),
+  TARGET_STATS_HALF_LIFE_DAYS: parseInt(process.env.TARGET_STATS_HALF_LIFE_DAYS || '30', 10),
+  TARGET_STATS_MAX_AGE_DAYS: parseInt(process.env.TARGET_STATS_MAX_AGE_DAYS || '180', 10),
+  // A comment's zap outcome is not knowable when it is posted, so outcomes are
+  // settled later by re-reading the comment's credits.
+  TARGET_SETTLE_HOURS: parseInt(process.env.TARGET_SETTLE_HOURS || '48', 10),
+  TARGET_SETTLE_BATCH: 20,
+  TARGET_SETTLE_MAX_PER_RUN: 60,
   RATE_LIMIT_DELAY: 2000,
   STATE_FILE: './.bot-state.json',
   DEBUG: process.env.DEBUG === 'true' || process.env.NODE_ENV !== 'production',
   BACKFILL_ENABLED: process.env.BACKFILL !== 'false',
   BACKFILL_DEPTH: parseInt(process.env.BACKFILL_DEPTH || '21', 10),
+  LIVE_DEPTH: parseInt(process.env.LIVE_DEPTH || '2', 10),
   INVIDIOUS_INSTANCES: (process.env.INVIDIOUS_INSTANCES || [
     'https://yewtu.be',
     'https://inv.nadeko.net',
@@ -43,7 +70,46 @@ const CONFIG = {
     'wss://nos.lol',
     'wss://relay.nostr.band',
     'wss://nostr.wine'
-  ]
+  ],
+  // Thumbnail in the Nostr note. Makes the note visually inviting, which is the
+  // whole point — a wall of text gets no zaps. Falls back to the plain
+  // Invidious/YouTube thumbnail URL if every Blossom upload attempt fails, so the
+  // image is never simply missing.
+  NOSTR_INCLUDE_THUMBNAIL: process.env.NOSTR_INCLUDE_THUMBNAIL !== 'false',
+  THUMBNAIL_QUALITY: process.env.THUMBNAIL_QUALITY || 'hqdefault',
+  THUMBNAIL_MAX_BYTES: parseInt(process.env.THUMBNAIL_MAX_BYTES || '2097152', 10),
+  THUMBNAIL_TIMEOUT_MS: parseInt(process.env.THUMBNAIL_TIMEOUT_MS || '10000', 10),
+  // BUD-02 content-addressed upload. Public servers are increasingly auth-walled,
+  // so a failure here is expected and non-fatal.
+  BLOSSOM_ENABLED: process.env.BLOSSOM_ENABLED !== 'false',
+  BLOSSOM_SERVERS: (process.env.BLOSSOM_SERVERS || 'https://blossom.primal.net,https://blossom.band')
+    .split(',').map(s => s.trim()).filter(Boolean),
+  BLOSSOM_TIMEOUT_MS: parseInt(process.env.BLOSSOM_TIMEOUT_MS || '15000', 10),
+  // Human-readable off-repo archive + backup of the track records.
+  GIST_ENABLED: process.env.GIST_ENABLED === 'true',
+  GIST_FILENAME: process.env.GIST_FILENAME || 'yewtubot-target-records.json',
+  GIST_HISTORY_LIMIT: parseInt(process.env.GIST_HISTORY_LIMIT || '500', 10),
+  // Good-over-unknown prioritisation. Candidates are scored and the best are
+  // commented on first, instead of taking whichever eligible post the feed
+  // happens to return first. Sub ROI varies ~40x, so spending on a proven
+  // winner beats spending on an unknown even when both pass every gate.
+  //
+  // Tier dominates the score, so a `good` target always outranks an `unknown`
+  // one, and an `unknown` always outranks a `stale` re-test. Unknown targets
+  // are still used when no proven winner is available, so discovery continues.
+  PRIORITIZE_TARGETS: process.env.PRIORITIZE_TARGETS !== 'false',
+  PRIORITY_TIER_WEIGHT: 1000000,
+  PRIORITY_WEIGHT_CREDITS: 1,
+  PRIORITY_WEIGHT_COST: 2,
+  PRIORITY_WEIGHT_AGE: 0.5,
+  // Rolling-ROI circuit breaker. Zap income is a lottery (the top 10 of 694
+  // comments produced 47% of gross sats), so a losing streak is expected and
+  // must not be allowed to drain the wallet. When the settled ROI over a
+  // trailing window is worse than CIRCUIT_MIN_ROI, the run stops commenting.
+  CIRCUIT_BREAKER_ENABLED: process.env.CIRCUIT_BREAKER_ENABLED !== 'false',
+  CIRCUIT_ROI_WINDOW_DAYS: parseInt(process.env.CIRCUIT_ROI_WINDOW_DAYS || '30', 10),
+  CIRCUIT_MIN_SAMPLES: parseInt(process.env.CIRCUIT_MIN_SAMPLES || '40', 10),
+  CIRCUIT_MIN_ROI: parseFloat(process.env.CIRCUIT_MIN_ROI || '-0.25')
 };
 
 // YouTube URL patterns
@@ -212,6 +278,17 @@ class StackerNewsBot {
     this.workingQuery = null;
     this.sessionCookies = null;
     this.creditBalance = 0;
+    this.authorStats = {};
+    this.subStats = {};
+    this.pendingSettles = {};
+    this.reprobations = 0;
+    this.thumbCache = {};
+    this.blossomDisabledThisRun = false;
+    this.verdictHistory = [];
+    this.lastVerdicts = {};
+    this.settledLedger = [];
+    this.circuitTripReason = null;
+    this.gistId = null;
     
     Logger.info('Bot initialized successfully', {
       publicKey: this.publicKey,
@@ -245,6 +322,14 @@ class StackerNewsBot {
       this.processedPosts = new Set(state.processedPosts || []);
       this.commentedPosts = new Set(state.commentedPosts || []);
       this.workingQuery = state.workingQuery || null;
+      this.authorStats = state.authorStats || {};
+      this.subStats = state.subStats || {};
+      this.pendingSettles = state.pendingSettles || {};
+      this.verdictHistory = state.verdictHistory || [];
+      this.settledLedger = state.settledLedger || [];
+      this.gistId = state.gistId || null;
+      this.lastVerdicts = {};
+      for (const h of this.verdictHistory) this.lastVerdicts[`${h.kind}:${h.name}`] = h.to;
 
       if (process.env.RESCAN === 'true') {
         const wasProcessed = this.processedPosts.size;
@@ -258,7 +343,10 @@ class StackerNewsBot {
         processedPostsCount: this.processedPosts.size,
         commentedPostsCount: this.commentedPosts.size,
         hasWorkingQuery: !!this.workingQuery,
-        workingQuery: this.workingQuery?.name || 'none'
+        workingQuery: this.workingQuery?.name || 'none',
+        authorsTracked: Object.keys(this.authorStats).length,
+        subsTracked: Object.keys(this.subStats).length,
+        pendingSettles: Object.keys(this.pendingSettles).length
       });
     } catch (error) {
       Logger.info('No previous state found, starting fresh');
@@ -271,6 +359,12 @@ class StackerNewsBot {
       processedPosts: Array.from(this.processedPosts),
       commentedPosts: Array.from(this.commentedPosts),
       workingQuery: this.workingQuery,
+      authorStats: this.authorStats,
+      subStats: this.subStats,
+      pendingSettles: this.pendingSettles,
+      verdictHistory: this.verdictHistory,
+      settledLedger: this.settledLedger,
+      gistId: this.gistId,
       lastRun: new Date().toISOString()
     };
     
@@ -613,7 +707,110 @@ class StackerNewsBot {
     }
   }
 
-  async publishNostrNote(title, postId, invidiousUrl, username, userHexPubkey, videoCount = 1, commentId) {
+  // ----- Video thumbnail (Blossom, with graceful fallback) -----
+
+  // Grab the thumbnail bytes. Invidious first to stay consistent with the bot's
+  // privacy posture, then ytimg as a fallback (yewtu.be itself 403s hotlinking).
+  async fetchThumbnailBytes(videoId) {
+    const q = CONFIG.THUMBNAIL_QUALITY;
+    const sources = [
+      ...(this.workingInvidiousInstances || []).map(i => `${i.replace(/\/$/, '')}/vi/${videoId}/${q}.jpg`),
+      `https://i.ytimg.com/vi/${videoId}/${q}.jpg`
+    ];
+    for (const url of sources) {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), CONFIG.THUMBNAIL_TIMEOUT_MS);
+        const res = await fetch(url, { signal: ctrl.signal });
+        clearTimeout(timer);
+        if (!res.ok) continue;
+        const buf = Buffer.from(await res.arrayBuffer());
+        // Reject HTML error pages served with a 200.
+        if (buf.length < 512 || buf.length > CONFIG.THUMBNAIL_MAX_BYTES) continue;
+        if (buf[0] !== 0xff || buf[1] !== 0xd8) continue;
+        return buf;
+      } catch (e) { /* try next source */ }
+    }
+    return null;
+  }
+
+  // NIP-98 / BUD-11 signed auth header. Public servers disagree on the exact
+  // shape, so each candidate is tried in turn.
+  blossomAuthHeaders(url, sha, bytes, kind) {
+    const now = Math.floor(Date.now() / 1000);
+    const tags = [
+      ['u', url],
+      ['x', sha],
+      ['expiration', String(now + 3600)]
+    ];
+    if (kind === 'action') tags.push(['action', 'upload']);
+    else tags.push(['method', 'PUT']);
+    if (kind !== 'action') tags.push(['action', 'upload']);
+    const event = finalizeEvent({ kind: 24242, created_at: now, tags, content: 'Upload thumbnail' }, this.privateKey);
+    return { Authorization: 'Nostr ' + Buffer.from(JSON.stringify(event)).toString('base64') };
+  }
+
+  async uploadToBlossom(bytes, ext = 'jpg') {
+    // Every public server rejected us once this run; don't pay the timeout again.
+    if (this.blossomDisabledThisRun) return null;
+    const sha = createHash('sha256').update(bytes).digest('hex');
+    for (const server of CONFIG.BLOSSOM_SERVERS) {
+      const base = server.replace(/\/$/, '');
+      const uploadUrl = `${base}/upload`;
+      const attempts = [
+        { url: uploadUrl, auth: null },
+        { url: uploadUrl, auth: this.blossomAuthHeaders(uploadUrl, sha, bytes, 'action') },
+        { url: uploadUrl, auth: this.blossomAuthHeaders(uploadUrl, sha, bytes, 'method') },
+        { url: `${base}/${sha}.${ext}`, auth: null }
+      ];
+      for (const a of attempts) {
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), CONFIG.BLOSSOM_TIMEOUT_MS);
+          const res = await fetch(a.url, {
+            method: 'PUT',
+            headers: { 'Content-Type': `image/${ext}`, ...(a.auth || {}) },
+            body: bytes,
+            signal: ctrl.signal
+          });
+          clearTimeout(timer);
+          if (!res.ok) continue;
+          // BUD-02 returns a descriptor; anonymous hash-path uploads return none.
+          let url = `${base}/${sha}.${ext}`;
+          try {
+            const body = await res.json();
+            if (body && body.url) url = body.url;
+            else if (body && body.sha256) url = `${base}/${body.sha256}.${ext}`;
+          } catch (e) { /* keep constructed URL */ }
+          return url;
+        } catch (e) { /* next attempt */ }
+      }
+      Logger.debug(`Blossom upload failed on ${base}`);
+    }
+    this.blossomDisabledThisRun = true;
+    return null;
+  }
+
+  // Returns a URL to use as the note's image, or null if we have nothing.
+  async resolveThumbnailUrl(videoId) {
+    if (!CONFIG.NOSTR_INCLUDE_THUMBNAIL || !videoId) return null;
+    if (this.thumbCache && this.thumbCache[videoId] !== undefined) return this.thumbCache[videoId];
+
+    const bytes = await this.fetchThumbnailBytes(videoId);
+    let url = null;
+    if (bytes) {
+      if (CONFIG.BLOSSOM_ENABLED) {
+        url = await this.uploadToBlossom(bytes);
+        if (url) Logger.debug(`Thumbnail ${videoId} uploaded to Blossom`);
+      }
+      // Fall back to the direct CDN URL so the note still shows an image.
+      if (!url) url = `https://i.ytimg.com/vi/${videoId}/${CONFIG.THUMBNAIL_QUALITY}.jpg`;
+    }
+    if (this.thumbCache) this.thumbCache[videoId] = url;
+    return url;
+  }
+
+  async publishNostrNote(title, postId, invidiousUrl, username, userHexPubkey, videoCount = 1, commentId, videoId) {
     Logger.debug('Publishing Nostr note', { title, postId, invidiousUrl, username, hasPubkey: !!userHexPubkey, videoCount, commentId });
     
     try {
@@ -633,11 +830,24 @@ class StackerNewsBot {
         nprofileLink = `@${username || 'anonymous'}`;
       }
       
+      // Resolve the thumbnail before composing the note. Never fatal: if this
+      // fails the note simply goes out without an image.
+      let thumbnailUrl = null;
+      try {
+        thumbnailUrl = await this.resolveThumbnailUrl(videoId);
+      } catch (e) {
+        Logger.debug(`Thumbnail resolution failed for ${videoId}: ${e.message}`);
+      }
+      const thumbnailMd = thumbnailUrl ? `![${(title || 'video').replace(/[[\]]/g, '')}](${thumbnailUrl})` : '';
+
       // Create note content
       const noteContent = CONFIG.NOSTR_NOTE_TEMPLATE
         .replace('{title}', title || 'Untitled Post')
         .replace('{stackerLink}', stackerLink)
         .replace('{nprofileLink}', nprofileLink)
+        .replace('{thumbnail}', thumbnailMd.trim())
+        // Collapse the blank line left behind when there is no thumbnail.
+        .replace(/\n{3,}/g, '\n\n')
         .replace('{videoLabel}', videoCount > 1 ? 'videos' : 'video');
 
       // Create Nostr event
@@ -650,7 +860,8 @@ class StackerNewsBot {
           ['t', 'privacy'],
           ['t', 'yewtubot'],
           ['r', stackerLink],
-          ['r', invidiousUrl]
+          ['r', invidiousUrl],
+          ...(thumbnailUrl ? [['imeta', `url ${thumbnailUrl}`, 'm image/jpeg']] : [])
         ],
         content: noteContent,
         pubkey: this.publicKey
@@ -695,7 +906,7 @@ class StackerNewsBot {
     }
   }
 
-// ----- Fee gate -----
+  // ----- Fee gate -----
   // Pre-flight guard against SN's 10x/100x/1000x fee escalation: blocks if
   // itemRepetition would force a multiplier above the cap. This bot runs on a
   // tight cadence, so the default mode is 'skip' (fail fast) rather than
@@ -785,7 +996,399 @@ class StackerNewsBot {
     }
   }
 
-  async processPost(post) {
+  // ----- Causal target track records -----
+  //
+  // Each observation is one comment the bot actually posted: `cost` is what it
+  // paid and `earned` is the comment's credits once settled. Nothing here is ever
+  // derived from the future, so a verdict only reflects the bot's own past.
+  //
+  // Records decay exponentially toward zero with TARGET_STATS_HALF_LIFE_DAYS.
+  // Decaying `n` and `earned` by the same factor leaves the per-comment average
+  // intact but shrinks the sample, so confidence erodes until `n` falls below
+  // TARGET_MIN_COMMENTS — at which point the verdict becomes 'unknown' and the
+  // target is re-tested. That is the forgiveness path: dead targets are always
+  // temporary, and a recovered author re-enters rotation on its own.
+
+  applyStatsDecay(now = Date.now()) {
+    if (!CONFIG.TARGET_STATS_ENABLED) return;
+    const halfLife = CONFIG.TARGET_STATS_HALF_LIFE_DAYS * 86400000;
+    if (!(halfLife > 0)) return;
+    for (const store of [this.authorStats, this.subStats]) {
+      for (const s of Object.values(store)) {
+        const elapsed = now - (s.decayedAt || s.last || now);
+        if (elapsed <= 0) continue;
+        const w = Math.pow(0.5, elapsed / halfLife);
+        s.n *= w;
+        s.earned *= w;
+        s.spent *= w;
+        s.gross *= w;
+        s.decayedAt = now;
+      }
+    }
+  }
+
+  pruneStats(now = Date.now()) {
+    if (!CONFIG.TARGET_STATS_ENABLED) return;
+    const cutoff = now - CONFIG.TARGET_STATS_MAX_AGE_DAYS * 86400000;
+    for (const store of [this.authorStats, this.subStats]) {
+      for (const [name, s] of Object.entries(store)) {
+        if ((s.last || 0) < cutoff || s.n < 0.01) delete store[name];
+      }
+    }
+  }
+
+  // 'good' | 'dead' | 'unknown' | 'stale'
+  //   good    — enough samples, net per comment at or above target
+  //   dead    — enough samples, net per comment below target
+  //   unknown — never seen
+  //   stale   — was tracked, but the record decayed below the sample floor and
+  //             is being re-tested from scratch (probation)
+  targetVerdict(kind, name) {
+    if (!CONFIG.TARGET_STATS_ENABLED || !name) return 'unknown';
+    const store = kind === 'author' ? this.authorStats : this.subStats;
+    const s = store[name];
+    if (!s) return 'unknown';
+    if (s.n < CONFIG.TARGET_MIN_COMMENTS) return 'stale';
+    const netPer = (s.earned - s.spent) / s.n;
+    return netPer >= CONFIG.TARGET_MIN_NET_PER ? 'good' : 'dead';
+  }
+
+  describeTarget(kind, name) {
+    const store = kind === 'author' ? this.authorStats : this.subStats;
+    const s = store[name] || {};
+    const n = s.n || 0;
+    const net = (s.earned || 0) - (s.spent || 0);
+    const netPer = n > 0 ? net / n : 0;
+    return `${kind} @${name} n=${n.toFixed(1)} net=${net.toFixed(0)} net/cmt=${netPer.toFixed(2)}`;
+  }
+
+  // Called after a comment is successfully posted. The zap outcome is unknown at
+  // this point, so the observation is queued and settled on a later run.
+  queueSettle(commentId, post, cost) {
+    if (!CONFIG.TARGET_STATS_ENABLED || !commentId) return;
+    this.pendingSettles[commentId] = {
+      author: post.user?.name || null,
+      sub: post.sub?.name || null,
+      cost: cost || 0,
+      ts: Date.now()
+    };
+  }
+
+  applyObservation(store, name, earned, spent, gross) {
+    if (!name) return;
+    const s = store[name] || { n: 0, earned: 0, spent: 0, gross: 0 };
+    s.n += 1;
+    s.earned += earned;
+    s.spent += spent;
+    s.gross += gross || 0;
+    s.last = Date.now();
+    s.decayedAt = Date.now();
+    store[name] = s;
+  }
+
+  // Re-read settled comments and fold their real outcome into the records.
+  async settlePendingComments() {
+    if (!CONFIG.TARGET_STATS_ENABLED) return;
+
+    const now = Date.now();
+    const due = Object.entries(this.pendingSettles)
+      .filter(([, p]) => now - p.ts >= CONFIG.TARGET_SETTLE_HOURS * 3600000)
+      .sort((a, b) => a[1].ts - b[1].ts)
+      .slice(0, CONFIG.TARGET_SETTLE_MAX_PER_RUN);
+
+    if (due.length === 0) return;
+
+    Logger.info(`📐 Settling ${due.length} past comment(s) older than ${CONFIG.TARGET_SETTLE_HOURS}h`);
+
+    let settled = 0;
+    for (let i = 0; i < due.length; i += CONFIG.TARGET_SETTLE_BATCH) {
+      const batch = due.slice(i, i + CONFIG.TARGET_SETTLE_BATCH);
+      let data;
+      try {
+        // One aliased query per batch keeps this to a single round trip.
+        const parts = batch.map(([cid], k) =>
+          `s${k}: item(id: "${cid}") { id sats credits }`
+        ).join(' ');
+        data = await this.makeGraphQLRequest(`query { ${parts} }`);
+      } catch (error) {
+        Logger.warn('Settle batch failed — leaving entries pending for next run', { error: error.message });
+        continue;
+      }
+
+      batch.forEach(([cid], k) => {
+        const item = data?.[`s${k}`];
+        const p = this.pendingSettles[cid];
+        if (!p) return;
+        if (!item) {
+          // Comment not retrievable (deleted?). Treat as a write-off so the
+          // record reflects reality instead of being silently dropped.
+          this.applyObservation(this.authorStats, p.author, 0, p.cost, 0);
+          this.applyObservation(this.subStats, p.sub, 0, p.cost, 0);
+          this.recordSettlement(0, p.cost);
+          delete this.pendingSettles[cid];
+          settled++;
+          return;
+        }
+        const earned = item.credits || 0;
+        const gross = item.sats || 0;
+        this.applyObservation(this.authorStats, p.author, earned, p.cost, gross);
+        this.applyObservation(this.subStats, p.sub, earned, p.cost, gross);
+        this.recordSettlement(earned, p.cost);
+        delete this.pendingSettles[cid];
+        settled++;
+      });
+
+      await this.sleep(this.RATE_LIMIT_DELAY || 500);
+    }
+
+    Logger.info(`📐 Settled ${settled} comment(s) into track records`, {
+      authorsTracked: Object.keys(this.authorStats).length,
+      subsTracked: Object.keys(this.subStats).length,
+      stillPending: Object.keys(this.pendingSettles).length
+    });
+  }
+
+  // ----- Prioritisation -----
+  //
+  // Tier is the dominant term. `dead` is filtered out earlier and never scores.
+  // Within a tier the tie-breakers are all things the data supports: posts that
+  // already hold credits are in a zapping mood (cost and credits are both
+  // mcredits, so they compare directly), cheaper posts are less risky, and
+  // fresher posts sit in the engagement window where zaps actually land.
+
+  candidateTier(post) {
+    const authorName = post.user?.name;
+    const subName = post.sub?.name;
+    let tier = 2; // unknown
+    for (const [kind, name] of [['author', authorName], ['sub', subName]]) {
+      const v = this.targetVerdict(kind, name);
+      if (v === 'good') tier = Math.max(tier, 3);
+      else if (v === 'stale') tier = Math.min(tier, 1);
+    }
+    return tier;
+  }
+
+  scoreCandidate(post, ageMin) {
+    const tier = this.candidateTier(post);
+    const value =
+      (post.credits || 0) * CONFIG.PRIORITY_WEIGHT_CREDITS -
+      (post.commentCost || 0) * CONFIG.PRIORITY_WEIGHT_COST -
+      ageMin * CONFIG.PRIORITY_WEIGHT_AGE;
+    return tier * CONFIG.PRIORITY_TIER_WEIGHT + value;
+  }
+
+  // ----- Rolling-ROI circuit breaker -----
+  //
+  // `settledLedger` is the bot's own realised P&L, one entry per comment whose
+  // outcome has actually been read. This is what the breaker judges — not the
+  // gated candidates, and not the still-pending comments.
+
+  recordSettlement(earned, spent) {
+    this.settledLedger.push({ ts: Date.now(), earned: earned || 0, spent: spent || 0 });
+  }
+
+  pruneLedger(now = Date.now()) {
+    const cutoff = now - CONFIG.CIRCUIT_ROI_WINDOW_DAYS * 86400000;
+    while (this.settledLedger.length && this.settledLedger[0].ts < cutoff) this.settledLedger.shift();
+    // Hard cap in case the window is set absurdly large.
+    const cap = Math.max(CONFIG.CIRCUIT_MIN_SAMPLES * 20, 2000);
+    if (this.settledLedger.length > cap) this.settledLedger.splice(0, this.settledLedger.length - cap);
+  }
+
+  rollingRoi() {
+    let earned = 0, spent = 0;
+    for (const e of this.settledLedger) { earned += e.earned; spent += e.spent; }
+    return { samples: this.settledLedger.length, earned, spent, net: earned - spent, roi: spent > 0 ? (earned - spent) / spent : 0 };
+  }
+
+  // Returns null when trading, or a human-readable reason to stand down.
+  circuitBreakerTrip() {
+    if (!CONFIG.CIRCUIT_BREAKER_ENABLED) return null;
+    const r = this.rollingRoi();
+    // Never trip on thin evidence.
+    if (r.samples < CONFIG.CIRCUIT_MIN_SAMPLES) return null;
+    if (r.roi >= CONFIG.CIRCUIT_MIN_ROI) return null;
+    return `rolling ROI ${(r.roi * 100).toFixed(0)}% over last ${r.samples} settled comments ` +
+           `(spent ${Math.round(r.spent)}, earned ${Math.round(r.earned)}) is worse than the ${(CONFIG.CIRCUIT_MIN_ROI * 100).toFixed(0)}% floor`;
+  }
+
+  // ----- Private gist archive -----
+  //
+  // The Actions cache is the live working copy, but it is not something you can
+  // read, and it can be evicted wholesale. The gist is both an off-repo backup
+  // and a human-readable archive: every verdict transition is appended so you can
+  // see which authors/subs went dead, when, and whether they ever recovered.
+  //
+  // Every call is best-effort. Gist failures must never stop the bot.
+
+  gistConfig() {
+    const token = process.env.GIST_TOKEN;
+    if (!CONFIG.GIST_ENABLED || !token) return null;
+    return {
+      token,
+      id: process.env.GIST_ID || null,
+      filename: CONFIG.GIST_FILENAME
+    };
+  }
+
+  async gistRequest(method, url, body) {
+    const cfg = this.gistConfig();
+    const res = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        ...(body ? { 'Content-Type': 'application/json' } : {})
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    if (!res.ok) throw new Error(`gist ${method} ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    return res.status === 204 ? null : res.json();
+  }
+
+  gistUrl(id) {
+    return id ? `https://gist.github.com/${id}` : null;
+  }
+
+  // Order of preference: the id learned on a previous run (kept in the state
+  // file), then an explicitly configured GIST_ID, then a lookup by filename.
+  // The gist is created by the bot on first run — no manual setup needed.
+  async resolveGistId() {
+    const cfg = this.gistConfig();
+    if (this.gistId) return this.gistId;
+    if (cfg.id) return cfg.id;
+    const list = await this.gistRequest('GET', 'https://api.github.com/gists?per_page=100');
+    const found = (list || []).find(g => g.files && g.files[cfg.filename]);
+    if (found) {
+      this.gistId = found.id;
+      Logger.info(`📝 Found existing gist archive ${this.gistUrl(found.id)}`);
+    }
+    return found ? found.id : null;
+  }
+
+  // Append a verdict transition. Repeats are suppressed so the archive records
+  // changes, not one line per skipped post.
+  noteVerdict(kind, name, verdict) {
+    if (!CONFIG.TARGET_STATS_ENABLED || !name) return;
+    const key = `${kind}:${name}`;
+    const prev = this.lastVerdicts[key];
+    if (prev === verdict) return;
+    this.lastVerdicts[key] = verdict;
+    const s = (kind === 'author' ? this.authorStats : this.subStats)[name] || {};
+    const n = s.n || 0;
+    this.verdictHistory.push({
+      ts: new Date().toISOString(),
+      kind,
+      name,
+      from: prev || null,
+      to: verdict,
+      n: Number(n.toFixed(2)),
+      netPer: n > 0 ? Number(((s.earned - s.spent) / n).toFixed(2)) : null,
+      spent: Math.round(s.spent || 0),
+      earned: Math.round(s.earned || 0)
+    });
+    if (this.verdictHistory.length > CONFIG.GIST_HISTORY_LIMIT) {
+      this.verdictHistory.splice(0, this.verdictHistory.length - CONFIG.GIST_HISTORY_LIMIT);
+    }
+  }
+
+  gistDocument() {
+    const deadList = (store, kind) => Object.entries(store)
+      .filter(([, s]) => s.n >= CONFIG.TARGET_MIN_COMMENTS && (s.earned - s.spent) / s.n < CONFIG.TARGET_MIN_NET_PER)
+      .map(([name, s]) => ({
+        name,
+        n: Number(s.n.toFixed(2)),
+        net: Math.round(s.earned - s.spent),
+        netPer: Number(((s.earned - s.spent) / s.n).toFixed(2)),
+        lastSeen: s.last ? new Date(s.last).toISOString() : null
+      }))
+      .sort((a, b) => a.netPer - b.netPer)
+      .map(x => ({ kind, ...x }));
+
+    return {
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      gistUrl: this.gistUrl(this.gistId),
+      config: {
+        minComments: CONFIG.TARGET_MIN_COMMENTS,
+        minNetPer: CONFIG.TARGET_MIN_NET_PER,
+        halfLifeDays: CONFIG.TARGET_STATS_HALF_LIFE_DAYS,
+        settleHours: CONFIG.TARGET_SETTLE_HOURS
+      },
+      currentlyDead: {
+        authors: deadList(this.authorStats, 'author'),
+        subs: deadList(this.subStats, 'sub')
+      },
+      records: { authors: this.authorStats, subs: this.subStats },
+      history: this.verdictHistory
+    };
+  }
+
+  // Restore when local state is missing/empty (e.g. the cache was evicted).
+  async restoreRecordsFromGist() {
+    const cfg = this.gistConfig();
+    if (!cfg) return;
+    try {
+      const id = await this.resolveGistId();
+      if (!id) { Logger.info('📝 No gist archive found yet — will create on save'); return; }
+      const gist = await this.gistRequest('GET', `https://api.github.com/gists/${id}`);
+      const file = gist.files && gist.files[cfg.filename];
+      if (!file || !file.content) { Logger.warn(`📝 Gist archive ${id} has no ${cfg.filename}`); return; }
+      const doc = JSON.parse(file.content);
+      const localAuthors = Object.keys(this.authorStats).length;
+      const localSubs = Object.keys(this.subStats).length;
+      if (localAuthors === 0 && doc.records?.authors && Object.keys(doc.records.authors).length) {
+        this.authorStats = doc.records.authors;
+        Logger.info(`📝 Restored ${Object.keys(doc.records.authors).length} author records from gist`);
+      }
+      if (localSubs === 0 && doc.records?.subs && Object.keys(doc.records.subs).length) {
+        this.subStats = doc.records.subs;
+        Logger.info(`📝 Restored ${Object.keys(doc.records.subs).length} sub records from gist`);
+      }
+      if (Array.isArray(doc.history) && doc.history.length > (this.verdictHistory?.length || 0)) {
+        this.verdictHistory = doc.history;
+        this.lastVerdicts = {};
+        for (const h of doc.history) this.lastVerdicts[`${h.kind}:${h.name}`] = h.to;
+        Logger.info(`📝 Restored ${doc.history.length} verdict history entries from gist`);
+      }
+    } catch (error) {
+      Logger.warn(`📝 Gist restore failed (continuing): ${error.message}`);
+    }
+  }
+
+  async pushRecordsToGist() {
+    const cfg = this.gistConfig();
+    if (!cfg) return;
+    try {
+      const doc = this.gistDocument();
+      const id = await this.resolveGistId();
+      const body = { description: 'YewTuBot author/sub track records (auto-updated)', files: { [cfg.filename]: { content: JSON.stringify(doc, null, 2) } } };
+      if (id) {
+        await this.gistRequest('PATCH', `https://api.github.com/gists/${id}`, body);
+        this.gistId = id;
+      } else {
+        const created = await this.gistRequest('POST', 'https://api.github.com/gists', { ...body, public: false });
+        this.gistId = created.id;
+        Logger.info('📝 Created private gist archive on first run — no setup needed from now on.');
+        Logger.info(`📝 GIST_ID: ${created.id}`);
+      }
+      const dead = doc.currentlyDead;
+      Logger.info('📝 Gist archive updated', {
+        url: this.gistUrl(this.gistId),
+        deadAuthors: dead.authors.length,
+        deadSubs: dead.subs.length,
+        historyEntries: doc.history.length
+      });
+    } catch (error) {
+      Logger.warn(`📝 Gist save failed (non-fatal): ${error.message}`);
+    }
+  }
+
+  // screenOnly: run every gate and extract links, but do nothing network-bound.
+  // Lets the scan rank candidates cheaply. The chosen posts are then run through
+  // the full path, so scoring can never bypass a gate.
+  async processPost(post, { screenOnly = false } = {}) {
     Logger.debug(`Processing post ${post.id}`, {
       id: post.id,
       title: post.title?.slice(0, 50) + (post.title?.length > 50 ? '...' : ''),
@@ -824,6 +1427,73 @@ class StackerNewsBot {
       return false;
     }
 
+    // ---- Profit gates (all free — evaluated before any network work) ----
+
+    // 0. Proven-dead target? Skipped, but only while the verdict is fresh —
+    //    a decayed record returns the target to probation automatically.
+    if (CONFIG.TARGET_STATS_ENABLED) {
+      const authorName = post.user?.name;
+      const subName = post.sub?.name;
+      for (const [kind, name] of [['author', authorName], ['sub', subName]]) {
+        const verdict = this.targetVerdict(kind, name);
+        if (verdict === 'dead') {
+          this.noteVerdict(kind, name, verdict);
+          Logger.info(`⏭️  Skipping post ${post.id}: dead ${kind} (${this.describeTarget(kind, name)})`);
+          return false;
+        }
+        if (verdict === 'stale') {
+          // Previously judged, record has since decayed — this is a re-test.
+          this.reprobations++;
+          this.noteVerdict(kind, name, 'stale');
+          Logger.info(`🔁 Re-testing ${kind} @${name}: record decayed below ${CONFIG.TARGET_MIN_COMMENTS} samples (${this.describeTarget(kind, name)})`);
+        }
+      }
+    }
+
+    // 1. Engagement window: only comment while the post can still attract zaps.
+    const ageMin = Math.round((Date.now() - new Date(post.createdAt).getTime()) / 60000);
+    if (CONFIG.MIN_POST_AGE_MIN > 0 && ageMin < CONFIG.MIN_POST_AGE_MIN) {
+      Logger.info(`⏭️  Skipping post ${post.id}: only ${ageMin}m old (min ${CONFIG.MIN_POST_AGE_MIN}m)`);
+      return false;
+    }
+    if (CONFIG.MAX_POST_AGE_MIN > 0 && ageMin > CONFIG.MAX_POST_AGE_MIN) {
+      Logger.info(`⏭️  Skipping post ${post.id}: ${ageMin}m old (max ${CONFIG.MAX_POST_AGE_MIN}m)`);
+      return false;
+    }
+
+    // 2. Cost cap: high commentCost is the single biggest value leak.
+    const cost = post.commentCost || 0;
+    if (cost > CONFIG.MAX_COMMENT_COST) {
+      Logger.info(`⏭️  Skipping post ${post.id}: comment costs ${cost} mcredits, above MAX_COMMENT_COST ${CONFIG.MAX_COMMENT_COST}`);
+      return false;
+    }
+
+    // 3. Affordability
+    if (cost > this.creditBalance) {
+      Logger.info(`⏭️  Skipping post ${post.id}: comment costs ${cost} mcredits but balance is ${this.creditBalance}`);
+      return false;
+    }
+    if (cost > 0) {
+      Logger.info(`💸 Comment will cost ${cost} mcredit(s) (balance: ${this.creditBalance})`);
+    }
+
+    // 4. Stacked value: sats + credits - boost - commentCost >= MIN_STACKED_VALUE
+    const stackedValue = (post.sats || 0) + (post.credits || 0) - (post.boost || 0) - cost;
+    if (stackedValue < CONFIG.MIN_STACKED_VALUE) {
+      Logger.info(`⏭️  Skipping post ${post.id}: stacked value ${stackedValue} is below minimum ${CONFIG.MIN_STACKED_VALUE} (sats=${post.sats || 0}, credits=${post.credits || 0}, boost=${post.boost || 0}, cost=${cost})`);
+      return false;
+    }
+    Logger.info(`📊 Stacked value ${stackedValue} meets minimum threshold of ${CONFIG.MIN_STACKED_VALUE}`);
+
+    if (screenOnly) {
+      return {
+        screenOnly: true,
+        score: this.scoreCandidate(post, ageMin),
+        tier: this.candidateTier(post),
+        videos: allVideos.length
+      };
+    }
+
     try {
       // Convert all videos to Invidious and optionally fetch titles
       const invidiousLinks = [];
@@ -851,27 +1521,9 @@ class StackerNewsBot {
           title: post.title?.slice(0, 50) + (post.title?.length > 50 ? '...' : ''),
           createdAt: post.createdAt,
           user: post.user?.name || 'Unknown',
-          age: Math.round((Date.now() - new Date(post.createdAt).getTime()) / (1000 * 60)) + ' minutes ago'
+          age: ageMin + ' minutes ago'
         }
       });
-
-      // Check if we can afford to comment
-      const cost = post.commentCost || 0;
-      if (cost > this.creditBalance) {
-        Logger.info(`⏭️  Skipping post ${post.id}: comment costs ${cost} mcredits but balance is ${this.creditBalance}`);
-        return false;
-      }
-      if (cost > 0) {
-        Logger.info(`💸 Comment will cost ${cost} mcredit(s) (balance: ${this.creditBalance})`);
-      }
-
-      // Check stacked value: sats + credits - boost - commentCost must be >= MIN_STACKED_VALUE
-      const stackedValue = (post.sats || 0) + (post.credits || 0) - (post.boost || 0) - cost;
-      if (stackedValue < CONFIG.MIN_STACKED_VALUE) {
-        Logger.info(`⏭️  Skipping post ${post.id}: stacked value ${stackedValue} is below minimum ${CONFIG.MIN_STACKED_VALUE} (sats=${post.sats || 0}, credits=${post.credits || 0}, boost=${post.boost || 0}, cost=${cost})`);
-        return false;
-      }
-      Logger.info(`📊 Stacked value ${stackedValue} meets minimum threshold of ${CONFIG.MIN_STACKED_VALUE}`);
 
       // Post comment on Stacker.News
       Logger.info(`💬 Posting comment on post ${post.id}...`);
@@ -882,12 +1534,16 @@ class StackerNewsBot {
       // Deduct the cost from our cached balance
       this.creditBalance -= cost;
 
+      // Queue this comment's outcome to be settled into the target track
+      // records on a later run (zaps have not arrived yet).
+      this.queueSettle(commentId, post, cost);
+
       // Publish Nostr note (pass first invidious URL for tagging, video count for label)
       Logger.info(`📡 Publishing Nostr note for post ${post.id}...`);
       const nostrResult = await this.publishNostrNote(
         post.title, post.id, invidiousLinks[0].invidiousUrl,
         post.user?.name, post.user?.optional?.nostrAuthPubkey, invidiousLinks.length,
-        commentId
+        commentId, allVideos[0]?.id
       );
       Logger.info(`✅ Nostr note published for post ${post.id}`, nostrResult);
 
@@ -929,6 +1585,11 @@ class StackerNewsBot {
         commentLimit: CONFIG.COMMENT_LIMIT,
         commentDelay: CONFIG.COMMENT_DELAY / 1000 + 's',
         maxMisses: CONFIG.MAX_CONSECUTIVE_MISSES,
+        maxCommentCost: CONFIG.MAX_COMMENT_COST,
+        postAgeWindowMin: [CONFIG.MIN_POST_AGE_MIN, CONFIG.MAX_POST_AGE_MIN],
+        targetStats: CONFIG.TARGET_STATS_ENABLED
+          ? { minComments: CONFIG.TARGET_MIN_COMMENTS, minNetPer: CONFIG.TARGET_MIN_NET_PER, halfLifeDays: CONFIG.TARGET_STATS_HALF_LIFE_DAYS }
+          : 'disabled',
         rateLimit: CONFIG.RATE_LIMIT_DELAY + 'ms',
         debugMode: CONFIG.DEBUG,
         backfillMode: CONFIG.BACKFILL_ENABLED,
@@ -940,8 +1601,35 @@ class StackerNewsBot {
       // Load previous state
       await this.loadState();
       
+      // Recover records from the gist archive if the local cache came up empty
+      if (CONFIG.GIST_ENABLED) await this.restoreRecordsFromGist();
+
       // Authenticate with Nostr
       await this.authenticateWithNostr();
+
+      // Age the target track records and fold in newly settled outcomes
+      if (CONFIG.TARGET_STATS_ENABLED) {
+        this.applyStatsDecay();
+        await this.settlePendingComments();
+        this.pruneStats();
+      }
+
+      // Capital preservation: stand down if realised returns are too poor.
+      this.pruneLedger();
+      this.circuitTripReason = this.circuitBreakerTrip();
+      if (this.circuitTripReason) {
+        Logger.warn(`🛑 Circuit breaker OPEN — ${this.circuitTripReason}`);
+        Logger.warn('🛑 Skipping all commenting this run. Settling and saving state only.');
+      } else {
+        const r = this.rollingRoi();
+        Logger.info('📈 Rolling ROI (realised)', {
+          samples: r.samples,
+          spent: Math.round(r.spent),
+          earned: Math.round(r.earned),
+          roi: `${(r.roi * 100).toFixed(0)}%`,
+          breakerArmed: r.samples >= CONFIG.CIRCUIT_MIN_SAMPLES
+        });
+      }
       
       // Ensure we have a working query before fetching
       // Re-derive if cached query is outdated (missing newer fields)
@@ -962,10 +1650,25 @@ class StackerNewsBot {
       }
       Logger.info(`💰 Sufficient mcredits (${this.creditBalance}), proceeding with scan`);
       
+      if (this.circuitTripReason) {
+        Logger.step(4, 7, 'Skipped — circuit breaker open');
+        Logger.step(5, 7, 'Archiving records and saving state');
+        if (CONFIG.GIST_ENABLED) await this.pushRecordsToGist();
+        await this.saveState();
+        Logger.info('Run completed — no comments posted (circuit breaker open)');
+        this.isRunning = false;
+        return;
+      }
+
       // Check which Invidious instances are responsive
       await this.refreshWorkingInstances();
-      
+
       Logger.step(4, 7, 'Scanning posts newest-first for YouTube links with ≥ 123 stacked value');
+      
+      // BACKFILL=false stops the scan after LIVE_DEPTH pages so a scheduled run
+      // never walks back into old, expensive, low-yield posts.
+      const maxPages = CONFIG.BACKFILL_ENABLED ? CONFIG.BACKFILL_DEPTH : CONFIG.LIVE_DEPTH;
+      Logger.info(`Page budget: ${maxPages} page(s) of ${CONFIG.SCAN_LIMIT} (${CONFIG.BACKFILL_ENABLED ? 'backfill' : 'live-only'} mode)`);
       
       let cursor = null;
       let consecutiveMisses = 0;
@@ -974,10 +1677,15 @@ class StackerNewsBot {
       let commentedCount = 0;
       let nostrNotesCount = 0;
       let youtubeLinksFound = 0;
+      let pagesFetched = 0;
       
       const query = this.workingQuery.query;
       
       while (commentedCount < CONFIG.COMMENT_LIMIT) {
+        if (pagesFetched >= maxPages) {
+          Logger.info(`🛑 Page budget reached (${pagesFetched}/${maxPages} pages) — stopping scan`);
+          break;
+        }
         const vars = { limit: CONFIG.SCAN_LIMIT };
         if (cursor) vars.cursor = cursor;
         
@@ -991,31 +1699,47 @@ class StackerNewsBot {
         
         cursor = response.items.cursor;
         totalFetched += posts.length;
+        pagesFetched++;
         
         Logger.info(`📄 Page: ${posts.length} posts (total fetched: ${totalFetched}, comments: ${commentedCount}/${CONFIG.COMMENT_LIMIT})`);
         
+        // Screen the whole page first. When prioritisation is on we rank the
+        // page and comment on the best candidates rather than the newest
+        // eligible ones, so proven winners are funded before unknowns.
+        const pageCandidates = [];
         for (const post of posts) {
           processedCount++;
-          
-          const result = await this.processPost(post);
-          if (result) {
-            commentedCount++;
-            nostrNotesCount++;
-            youtubeLinksFound++;
+          const screened = await this.processPost(post, { screenOnly: true });
+          if (screened && screened.screenOnly) {
+            pageCandidates.push({ post, ...screened });
             consecutiveMisses = 0;
-            
-            if (commentedCount >= CONFIG.COMMENT_LIMIT) {
-              Logger.info(`✅ Reached target of ${CONFIG.COMMENT_LIMIT} comments`);
-              break;
-            }
-            
-            Logger.info(`⏳ Comment ${commentedCount}/${CONFIG.COMMENT_LIMIT}: waiting ${CONFIG.COMMENT_DELAY / 1000}s...`);
-            await this.sleep(CONFIG.COMMENT_DELAY);
           } else {
             consecutiveMisses++;
           }
         }
-        
+
+        if (CONFIG.PRIORITIZE_TARGETS && pageCandidates.length) {
+          pageCandidates.sort((x, y) => y.score - x.score);
+          const ranked = pageCandidates.map(c => `${c.post.sub?.name || '-'}/${c.post.user?.name || '-'}(t${c.tier},${c.score.toFixed(0)})`).join(' ');
+          Logger.debug(`Ranked ${pageCandidates.length} candidate(s): ${ranked}`);
+        }
+
+        for (const cand of pageCandidates) {
+          if (commentedCount >= CONFIG.COMMENT_LIMIT) break;
+
+          const result = await this.processPost(cand.post);
+          if (result) {
+            commentedCount++;
+            nostrNotesCount++;
+            youtubeLinksFound++;
+            Logger.info(`💬 Commented on ${cand.post.sub?.name || 'direct'}/${cand.post.user?.name || '?'} (tier ${cand.tier}, score ${cand.score.toFixed(0)})`);
+
+            if (commentedCount >= CONFIG.COMMENT_LIMIT) break;
+            Logger.info(`⏳ Comment ${commentedCount}/${CONFIG.COMMENT_LIMIT}: waiting ${CONFIG.COMMENT_DELAY / 1000}s...`);
+            await this.sleep(CONFIG.COMMENT_DELAY);
+          }
+        }
+
         if (commentedCount >= CONFIG.COMMENT_LIMIT) break;
 
         if (!cursor) {
@@ -1031,8 +1755,13 @@ class StackerNewsBot {
         await this.sleep(CONFIG.RATE_LIMIT_DELAY);
       }
       
-      Logger.step(5, 7, 'Saving state and generating summary');
+      Logger.step(5, 7, 'Archiving records and generating summary');
       
+      // Mirror to the private gist archive (backup + human-readable history).
+      // This runs before saveState so a gist created on the first run has its
+      // id persisted and later runs never have to search for it again.
+      if (CONFIG.GIST_ENABLED) await this.pushRecordsToGist();
+
       // Save state
       await this.saveState();
       
@@ -1050,7 +1779,14 @@ class StackerNewsBot {
         successRate: processedCount > 0 ? `${Math.round(youtubeLinksFound / processedCount * 100)}%` : '0%',
         workingQuery: this.workingQuery?.name || 'none',
         totalProcessedPosts: this.processedPosts.size,
-        totalCommentedPosts: this.commentedPosts.size
+        totalCommentedPosts: this.commentedPosts.size,
+        reprobations: this.reprobations,
+        authorsTracked: Object.keys(this.authorStats).length,
+        subsTracked: Object.keys(this.subStats).length,
+        pendingSettles: Object.keys(this.pendingSettles).length,
+        rollingRoi: `${(this.rollingRoi().roi * 100).toFixed(0)}%`,
+        circuitBreaker: this.circuitTripReason ? 'OPEN' : 'closed',
+        gistArchive: this.gistUrl(this.gistId)
       };
       
       Logger.info('🏁 Bot run completed', summary);

@@ -54,8 +54,39 @@ jobs:
         SESSION_COOKIES: ${{ secrets.SESSION_COOKIES }}
         NODE_ENV: production
         DEBUG: 'true'
-        BACKFILL: 'true'
-        BACKFILL_DEPTH: ${{ inputs.rescan == 'true' && '50' || '10' }}
+        # Live-only for scheduled runs: walking back into old posts means paying
+        # high commentCost for a ~5% zap rate. Rescans still use backfill depth.
+        BACKFILL: ${{ inputs.rescan == 'true' && 'true' || 'false' }}
+        BACKFILL_DEPTH: ${{ inputs.rescan == 'true' && '50' || '2' }}
+        LIVE_DEPTH: '2'
+        MAX_COMMENT_COST: '5'
+        MIN_POST_AGE_MIN: '30'
+        MAX_POST_AGE_MIN: '360'
+        # Causal track records for authors/subs. A "dead" verdict decays and
+        # returns to probation automatically, so nothing stays blocked forever.
+        TARGET_STATS_ENABLED: 'true'
+        TARGET_MIN_COMMENTS: '8'
+        TARGET_MIN_NET_PER: '0'
+        TARGET_STATS_HALF_LIFE_DAYS: '30'
+        TARGET_STATS_MAX_AGE_DAYS: '180'
+        TARGET_SETTLE_HOURS: '48'
+        # Private gist: human-readable archive of dead/profitable targets plus a
+        # backup to restore from if the Actions cache is ever lost.
+        GIST_ENABLED: 'true'
+        GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+        GIST_ID: ${{ secrets.GIST_ID }}
+        # Thumbnail in the Nostr note. Blossom upload is best-effort; if every
+        # server rejects it the note falls back to the plain thumbnail URL.
+        NOSTR_INCLUDE_THUMBNAIL: 'true'
+        THUMBNAIL_QUALITY: 'hqdefault'
+        BLOSSOM_ENABLED: 'true'
+        # Fund proven winners before unknowns instead of taking feed order.
+        PRIORITIZE_TARGETS: 'true'
+        # Stand down when realised rolling ROI drops below the floor.
+        CIRCUIT_BREAKER_ENABLED: 'true'
+        CIRCUIT_ROI_WINDOW_DAYS: '30'
+        CIRCUIT_MIN_SAMPLES: '40'
+        CIRCUIT_MIN_ROI: '-0.25'
         RESCAN: ${{ inputs.rescan || 'false' }}
       run: npm start
         
