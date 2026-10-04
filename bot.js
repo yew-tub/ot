@@ -1253,11 +1253,24 @@ class StackerNewsBot {
 
   // Order of preference: the id learned on a previous run (kept in the state
   // file), then an explicitly configured GIST_ID, then a lookup by filename.
-  // The gist is created by the bot on first run — no manual setup needed.
+  // A configured id is verified before it is trusted: a stale or mistyped
+  // GIST_ID would otherwise 404 on every request and silently kill the
+  // archive for good, so an unusable one is ignored and discovery continues.
   async resolveGistId() {
     const cfg = this.gistConfig();
     if (this.gistId) return this.gistId;
-    if (cfg.id) return cfg.id;
+    if (cfg.id) {
+      try {
+        await this.gistRequest('GET', `https://api.github.com/gists/${cfg.id}`);
+        this.gistId = cfg.id;
+        return this.gistId;
+      } catch (error) {
+        Logger.warn(`📝 Configured GIST_ID is unusable, falling back to auto-discovery`, {
+          id: cfg.id,
+          error: error.message
+        });
+      }
+    }
     const list = await this.gistRequest('GET', 'https://api.github.com/gists?per_page=100');
     const found = (list || []).find(g => g.files && g.files[cfg.filename]);
     if (found) {
@@ -1357,6 +1370,14 @@ class StackerNewsBot {
     }
   }
 
+  async createGist(body) {
+    const created = await this.gistRequest('POST', 'https://api.github.com/gists', { ...body, public: false });
+    this.gistId = created.id;
+    Logger.info('📝 Created private gist archive — no setup needed from now on.');
+    Logger.info(`📝 GIST_ID: ${created.id}`);
+    return created.id;
+  }
+
   async pushRecordsToGist() {
     const cfg = this.gistConfig();
     if (!cfg) return;
@@ -1364,14 +1385,17 @@ class StackerNewsBot {
       const doc = this.gistDocument();
       const id = await this.resolveGistId();
       const body = { description: 'YewTuBot author/sub track records (auto-updated)', files: { [cfg.filename]: { content: JSON.stringify(doc, null, 2) } } };
-      if (id) {
-        await this.gistRequest('PATCH', `https://api.github.com/gists/${id}`, body);
-        this.gistId = id;
+      if (!id) {
+        await this.createGist(body);
       } else {
-        const created = await this.gistRequest('POST', 'https://api.github.com/gists', { ...body, public: false });
-        this.gistId = created.id;
-        Logger.info('📝 Created private gist archive on first run — no setup needed from now on.');
-        Logger.info(`📝 GIST_ID: ${created.id}`);
+        try {
+          await this.gistRequest('PATCH', `https://api.github.com/gists/${id}`, body);
+          this.gistId = id;
+        } catch (error) {
+          if (!error.message.includes('404')) throw error;
+          Logger.warn(`📝 Gist ${id} vanished mid-run, creating a replacement`);
+          await this.createGist(body);
+        }
       }
       const dead = doc.currentlyDead;
       Logger.info('📝 Gist archive updated', {
