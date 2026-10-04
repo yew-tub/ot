@@ -75,11 +75,19 @@ jobs:
         GIST_ENABLED: 'true'
         GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
         GIST_ID: ${{ secrets.GIST_ID }}
-        # Thumbnail in the Nostr note. Blossom upload is best-effort; if every
-        # server rejects it the note falls back to the plain thumbnail URL.
+        # Thumbnail in the Nostr note, embedded directly from the YouTube CDN.
+        #
+        # Blossom upload is off: every public Blossom server tested
+        # (blossom.primal.net, blossom.band, blossom.nostr.build,
+        # cdn.blossom.cloud, blossom.yabu.me) rejects programmatic uploads, so
+        # the attempt only cost round-trips before falling back anyway. The
+        # thumbnail bytes are still fetched and validated, so a dead video id
+        # yields no image rather than a broken one.
+        # Set BLOSSOM_ENABLED=true and point BLOSSOM_SERVERS at a server you
+        # run to get content-addressed URLs.
         NOSTR_INCLUDE_THUMBNAIL: 'true'
         THUMBNAIL_QUALITY: 'hqdefault'
-        BLOSSOM_ENABLED: 'true'
+        BLOSSOM_ENABLED: 'false'
         # Fund proven winners before unknowns instead of taking feed order.
         PRIORITIZE_TARGETS: 'true'
         # Stand down when realised rolling ROI drops below the floor.

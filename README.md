@@ -128,7 +128,7 @@ Go to **Settings → Secrets and variables → Actions** and add:
 | `TARGET_SETTLE_HOURS` | `48` | Wait before reading a comment's outcome |
 | `NOSTR_INCLUDE_THUMBNAIL` | `true` | Put the video thumbnail in the Nostr note |
 | `THUMBNAIL_QUALITY` | `hqdefault` | Thumbnail variant (`hqdefault` is the most reliable) |
-| `BLOSSOM_ENABLED` | `true` | Upload the thumbnail to a Blossom server |
+| `BLOSSOM_ENABLED` | `true` | Upload to Blossom (off in the workflow — public servers reject it) |
 | `BLOSSOM_SERVERS` | blossom.primal.net,blossom.band | Comma-separated BUD-02 endpoints |
 | `GIST_ENABLED` | `false` | Mirror records to a private gist |
 | `GIST_TOKEN` | — | PAT with `gist` scope (required for `GIST_ENABLED`) |
@@ -325,12 +325,31 @@ Primal render natively. The bytes are fetched from a working Invidious instance
 first and from `i.ytimg.com` as a fallback (`yewtu.be` returns 403 for hotlinked
 thumbnails), and the resulting URL is cached per video for the run.
 
-Blossom upload is best-effort. Public servers increasingly reject programmatic
-uploads — `blossom.primal.net` and `blossom.band` currently answer `401` to every
-BUD-02 auth shape, so in practice the note falls back to the direct
-`i.ytimg.com` thumbnail URL and still renders. After one failed round the bot
-stops retrying for the rest of the run. Point `BLOSSOM_SERVERS` at a server you
-run to get content-addressed URLs.
+**Blossom upload is disabled by default.** Every public Blossom server tested
+rejects programmatic uploads from a fresh key:
+
+| Server | Result |
+|---|---|
+| `blossom.primal.net` | parses the auth event, rejects the `action` value |
+| `blossom.band` | `401` on every auth shape |
+| `blossom.nostr.build` | `401` on every auth shape |
+| `cdn.blossom.cloud` | connection fails |
+| `blossom.yabu.me` | `500` on every endpoint |
+
+Both auth kinds (24242 and 27235), standard and base64url encodings, single-event
+and array payloads, `/upload` and server-root `u` tags, with and without
+`X-SHA-256`, and the `/media` and anonymous hash-path endpoints were all tried.
+Since the attempt only cost round-trips before falling back to the same image,
+`BLOSSOM_ENABLED` defaults to `false` in the workflow.
+
+This costs little: the image is served straight from `i.ytimg.com`, one of the most
+durable CDNs in use, and YouTube thumbnails are public content, so Blossom's
+privacy advantage barely applies here. Set `BLOSSOM_ENABLED=true` and point
+`BLOSSOM_SERVERS` at a server you run to get content-addressed URLs; after one
+failed round the bot stops retrying for the rest of the run either way.
+
+The thumbnail bytes are still fetched and validated even with Blossom off, so a
+dead video id produces no image rather than a broken one.
 
 ## Configuration Reference
 
